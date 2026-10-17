@@ -1,0 +1,4 @@
+# Response with a corrupted CRC (line noise) — rejected, counted as crc_error
+# expect address=21 status=crc_error
+> 15 04 00 00 00 0E 72 DA
+! 15 04 1C 43 64 19 9A 00 00 00 00 00 00 00 00 40 4C CC CD 00 00 00 00 00 00 00 00 44 31 80 00 84 F8

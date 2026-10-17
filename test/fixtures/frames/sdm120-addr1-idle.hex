@@ -1,0 +1,6 @@
+# SDM120 at slave 1, no load, fresh meter
+# expect address=1 register=1.500 voltage=231.4 current=0 powerW=0 frequencyHz=49.98
+> 01 04 00 00 00 0E 71 CE
+< 01 04 1C 43 67 66 66 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 75 50
+> 01 04 00 46 00 04 10 1C
+< 01 04 08 42 47 EB 85 3F C0 00 00 40 0D

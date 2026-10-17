@@ -1,0 +1,16 @@
+{
+  "driver": "eastron_sdm120",
+  "model": "Eastron SDM120-Modbus class 1, single phase (and register-compatible meters)",
+  "source": "Eastron SDM120-Modbus protocol V2.1 — input registers, IEEE-754 float32, high word first",
+  "functionCode": 4,
+  "wordOrder": "big",
+  "maxBlockRegisters": 40,
+  "register": { "address": 72, "type": "float32", "unit": "kwh", "scale": "1" },
+  "extras": {
+    "voltage": { "address": 0, "type": "float32", "decimals": 1 },
+    "current": { "address": 6, "type": "float32", "decimals": 2 },
+    "powerW": { "address": 12, "type": "float32", "decimals": 0 },
+    "frequencyHz": { "address": 70, "type": "float32", "decimals": 2 }
+  },
+  "probe": { "address": 0, "count": 2 }
+}

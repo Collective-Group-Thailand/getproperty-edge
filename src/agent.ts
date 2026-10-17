@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { ConfigManager } from './config/config-manager.js';
 import type { Runtime } from './config/runtime.js';
+import { LinuxTtyTransport, type SerialTransport } from './drivers/modbus/serial.js';
 import { parseSimConfig, type SimConfig } from './drivers/simulator/sim-config.js';
 import { SimulatorDriver } from './drivers/simulator/simulator-driver.js';
 import type { AgentEnv } from './env.js';
@@ -13,7 +14,7 @@ import { IdentityStore } from './identity/identity-store.js';
 import { CertificateRenewer } from './identity/renewal.js';
 import { DeviceTokenCache } from './identity/token.js';
 import { buildEvent } from './protocol/envelopes.js';
-import type { DeviceEventSeverity, DeviceEventType, TopicSuffix } from './protocol/types.js';
+import type { BusConfig, DeviceEventSeverity, DeviceEventType, TopicSuffix } from './protocol/types.js';
 import { Outbox } from './queue/outbox.js';
 import { type NewReading, ReadingQueue } from './queue/reading-queue.js';
 import { alwaysSynced, type ClockSync } from './scheduler/clock-sync.js';
@@ -36,6 +37,7 @@ export interface AgentDeps {
   logRing?: LogRing;
   clock?: Clock;
   clockSync?: ClockSync;
+  serialFactory?: (bus: BusConfig) => SerialTransport;
   /** Overrides the broker link (tests). */
   linkFactory?: (identity: Identity) => Link & { start(): void; stop(): Promise<void>; restart?(): void };
   simConfig?: SimConfig;
@@ -119,15 +121,12 @@ export class Agent {
         logger: d.logger,
         mode: env.driverMode,
         ...(this.simulator ? { simulator: this.simulator } : {}),
+        serialFactory:
+          d.serialFactory ??
+          ((bus) =>
+            new LinuxTtyTransport({ device: bus.device!, baud: bus.baud ?? 9600, parity: bus.parity ?? 'none' })),
         jitterMaxMs: d.jitterMaxMs ?? 3000,
-        uncleanStart: () => this.uncleanStart,
         onResults: (r) => this.onResults(r),
-        onPulseOverflow: (meterId, hz) =>
-          this.emitEvent('pulse_overflow', 'warning', {
-            meterId,
-            message: `pulse rate ${hz.toFixed(1)} Hz above plausibility limit`,
-            data: { hz },
-          }),
       },
       {
         applied: (version, info) =>

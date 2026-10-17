@@ -1,0 +1,4 @@
+# Slave 21 answers "illegal data address" (exception 02) — wrong model/map for this binding
+# expect address=21 status=not_found
+> 15 04 00 00 00 0E 72 DA
+< 15 84 02 82 C5

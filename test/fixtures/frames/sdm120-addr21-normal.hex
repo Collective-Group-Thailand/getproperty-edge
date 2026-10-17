@@ -1,0 +1,6 @@
+# SDM120 at slave 21: voltage/current/power block, then frequency/import-energy block
+# expect address=21 register=12345.678 voltage=228.1 current=3.2 powerW=710 frequencyHz=50.02
+> 15 04 00 00 00 0E 72 DA
+< 15 04 1C 43 64 19 9A 00 00 00 00 00 00 00 00 40 4C CC CD 00 00 00 00 00 00 00 00 44 31 80 00 84 F7
+> 15 04 00 46 00 04 13 08
+< 15 04 08 42 48 14 7B 46 40 E6 B6 10 44
