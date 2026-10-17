@@ -104,6 +104,7 @@ export class Agent {
   statusPort: number | undefined;
   ota: OtaUpdater | undefined;
   private renewer: CertificateRenewer | undefined;
+  private configPullTimer: NodeJS.Timeout | undefined;
   private readonly metrics: SystemMetrics;
   private readonly startedAt: number;
   private provisioningState: StatusView['provisioning'] = 'waiting_for_code';
@@ -299,8 +300,11 @@ export class Agent {
       currentVersion: this.d.ota?.currentVersion ?? AGENT_VERSION,
       arch: this.d.ota?.arch ?? process.arch,
       fetchManifest: async (url) => {
-        const same = new URL(url).origin === new URL(env.apiBaseUrl).origin;
-        return this.api.json('GET', url, undefined, {
+        // `manifestUrl` is `<api>/v1/device/ota/manifest?releaseId=…` (protocol §6); a relative URL is
+        // resolved against the API origin.
+        const abs = new URL(url, env.apiBaseUrl);
+        const same = abs.origin === new URL(env.apiBaseUrl).origin;
+        return this.api.json('GET', abs.href, undefined, {
           mtls: same,
           ...(same ? { bearer: await this.tokens.get() } : {}),
         });
@@ -331,6 +335,7 @@ export class Agent {
     });
 
     await this.config.boot();
+    if (env.configPullAfterS > 0) this.scheduleConfigPull(env.configPullAfterS * 1000);
     this.forwarder.start();
     this.health.start();
     link.start();
@@ -338,6 +343,32 @@ export class Agent {
     void this.ota
       .onBoot()
       .catch((err: unknown) => this.d.logger.error({ err: (err as Error).message }, 'OTA boot check failed'));
+  }
+
+  /**
+   * Cold start without MQTT (protocol §6): when no config is applied `configPullAfterS` after start (the
+   * retained `/config` normally arrives within a second of connecting), fetch the latest compiled config
+   * over HTTPS and apply it like an MQTT one; retried every 5 min until a config is active.
+   */
+  private scheduleConfigPull(delayMs: number): void {
+    if (this.stopped || this.config.current()) return;
+    this.configPullTimer = setTimeout(() => void this.pullConfig(), delayMs);
+    this.configPullTimer.unref();
+  }
+
+  private async pullConfig(): Promise<void> {
+    if (this.stopped || this.config.current()) return;
+    try {
+      const cfg = await this.api.json<unknown>('GET', '/v1/device/config', undefined, {
+        mtls: true,
+        bearer: await this.tokens.get(),
+      });
+      const outcome = await this.config.apply(cfg);
+      this.d.logger.info({ outcome }, 'config fetched over HTTPS (cold start without MQTT)');
+    } catch (err) {
+      this.d.logger.warn({ err: (err as Error).message }, 'config pull over HTTPS failed');
+    }
+    this.scheduleConfigPull(5 * 60_000);
   }
 
   /** Graceful stop, then exit so systemd starts `current` again (restart command, OTA switch/rollback). */
@@ -352,6 +383,7 @@ export class Agent {
     if (this.stopped) return;
     this.stopped = true;
     this.renewer?.stop();
+    clearTimeout(this.configPullTimer);
     this.health?.stop();
     await this.config.stop();
     this.forwarder?.stop();

@@ -7,12 +7,18 @@ import type { DeviceTokenCache } from '../identity/token.js';
 import type { DeviceApi } from '../transport/https/device-api.js';
 import type { LogRing } from '../util/logger.js';
 
+/** `POST /v1/device/logs/presign` answer (CR-004, done in api A `13be5a7`). */
 export interface PresignResponse {
+  /** The `core.document` (kind `log_bundle`) the bundle becomes. */
+  fileId?: string;
   uploadUrl: string;
   method?: 'PUT';
   headers?: Record<string, string>;
   expiresAt?: string;
 }
+
+/** The api refuses presigns above 50 MB (CR-004). */
+export const MAX_BUNDLE_BYTES = 50 * 1024 * 1024;
 
 /**
  * `upload_logs`: bundles the in-memory log ring plus the last 24 h of the systemd journal (when present),
@@ -43,8 +49,9 @@ export class LogUploader {
     return gzipSync(Buffer.from(text));
   }
 
-  async upload(sinceHours = 24): Promise<{ bytes: number; sha256: string }> {
+  async upload(sinceHours = 24): Promise<{ bytes: number; sha256: string; fileId?: string }> {
     const body = await this.bundle(sinceHours);
+    if (body.length > MAX_BUNDLE_BYTES) throw new Error(`log bundle ${body.length} B exceeds the 50 MB presign limit`);
     const sha256 = createHash('sha256').update(body).digest('hex');
     const bearer = await this.tokens.get();
     const pre = await this.api.json<PresignResponse>(
@@ -61,6 +68,6 @@ export class LogUploader {
       false,
     );
     if (res.status < 200 || res.status >= 300) throw new Error(`log upload PUT → ${res.status}`);
-    return { bytes: body.length, sha256 };
+    return { bytes: body.length, sha256, ...(pre.fileId ? { fileId: pre.fileId } : {}) };
   }
 }

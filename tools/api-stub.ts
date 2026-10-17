@@ -32,6 +32,8 @@ export class ApiStub {
   readonly uploads = new Map<string, Buffer>();
   readonly files = new Map<string, { body: Buffer; type: string }>();
   readonly calls: string[] = [];
+  /** Latest compiled config per gateway (`GET /v1/device/config`, protocol §6). */
+  readonly configs = new Map<string, unknown>();
   readingsDown = false;
   tokenSeq = 0;
 
@@ -92,7 +94,7 @@ export class ApiStub {
         const b = JSON.parse(body.toString()) as { provisioningCode?: string; csrPem?: string };
         const gw = b.provisioningCode ? this.codes.get(b.provisioningCode) : undefined;
         if (!gw || this.usedCodes.has(b.provisioningCode!))
-          return this.problem(res, 422, 'device.provisioning_code_invalid');
+          return this.problem(res, 401, 'device.provisioning_code_invalid');
         this.usedCodes.add(b.provisioningCode!);
         const certificatePem = await signCsr(this.o.ca, b.csrPem ?? '', gw, {
           days: this.o.certDays ?? 365,
@@ -123,18 +125,29 @@ export class ApiStub {
         return this.json(res, 200, {
           certificatePem: await signCsr(this.o.ca, b.csrPem, gw, { days: this.o.certDays ?? 365 }),
           caChainPem: this.o.ca.certPem,
+          notAfter: new Date(Date.now() + (this.o.certDays ?? 365) * 86_400_000).toISOString(),
         });
       }
       if (req.method === 'POST' && url.pathname === '/v1/device/readings/batch') {
         if (this.readingsDown) return this.problem(res, 503, 'service_unavailable');
         const batch: TelemetryBatch = assertValid('TelemetryBatch', JSON.parse(body.toString()));
-        if (`gw-${batch.gatewayId}` !== cn) return this.problem(res, 403, 'device.identity_mismatch');
+        if (`gw-${batch.gatewayId}` !== cn) return this.problem(res, 422, 'device.invalid_payload');
+        const before = { a: this.o.ingest?.accepted ?? 0, d: this.o.ingest?.duplicates ?? 0 };
         this.o.ingest?.telemetry(batch);
-        return this.json(res, 202, { accepted: batch.readings.length });
+        return this.json(res, 200, {
+          accepted: this.o.ingest ? this.o.ingest.accepted - before.a : batch.readings.length,
+          duplicates: this.o.ingest ? this.o.ingest.duplicates - before.d : 0,
+          rejected: [],
+        });
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/device/config') {
+        const cfg = this.configs.get(cn!.replace(/^gw-/, ''));
+        return cfg ? this.json(res, 200, cfg) : this.problem(res, 404, 'device.config_not_found');
       }
       if (req.method === 'POST' && url.pathname === '/v1/device/logs/presign') {
         const id = randomUUID();
         return this.json(res, 200, {
+          fileId: id,
           uploadUrl: `${this.baseUrl}/upload/${id}`,
           method: 'PUT',
           expiresAt: new Date(Date.now() + 600_000).toISOString(),
@@ -145,8 +158,8 @@ export class ApiStub {
         res.writeHead(200).end();
         return;
       }
-      if (req.method === 'GET' && this.files.has(url.pathname)) {
-        const f = this.files.get(url.pathname)!;
+      if (req.method === 'GET' && (this.files.has(url.pathname + url.search) || this.files.has(url.pathname))) {
+        const f = (this.files.get(url.pathname + url.search) ?? this.files.get(url.pathname))!;
         res.writeHead(200, { 'content-type': f.type, 'content-length': String(f.body.length) });
         res.end(f.body);
         return;

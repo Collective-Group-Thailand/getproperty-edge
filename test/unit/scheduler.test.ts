@@ -186,14 +186,23 @@ describe('register maths', () => {
     expect(c.quality).toBe('good');
     expect(formatMilli(c.registerMilli)).toBe('100002.000');
   });
-  it('sends a decrease unchanged and flags it (never dropped)', () => {
+  it('sends a decrease unchanged with quality register_decrease (never dropped, CR-007)', () => {
     const p = processRegister(
       { registerMilli: 4000n, unit: 'kwh' },
       { lastRawMilli: 5000n, rolloverOffsetMilli: 0n, lastRegisterMilli: 5000n },
-      { clockSuspect: false },
+      { clockSuspect: true },
     );
     expect(p.registerMilli).toBe(4000n);
+    expect(p.quality).toBe('register_decrease');
     expect(p.decrease).toEqual({ previousMilli: 5000n, currentMilli: 4000n });
+  });
+  it('register_decrease outranks estimated_by_gateway (the cloud must review it)', () => {
+    const p = processRegister(
+      { registerMilli: 4000n, unit: 'm3', estimated: true },
+      { lastRawMilli: 5000n, rolloverOffsetMilli: 0n, lastRegisterMilli: 5000n },
+      { clockSuspect: false },
+    );
+    expect(p.quality).toBe('register_decrease');
   });
   it('a small drop on a meter with rollover is a decrease, not a wrap', () => {
     const p = processRegister(
@@ -201,10 +210,10 @@ describe('register maths', () => {
       { lastRawMilli: 5000n, rolloverOffsetMilli: 0n, lastRegisterMilli: 5000n },
       { clockSuspect: false },
     );
-    expect(p.quality).toBe('good');
+    expect(p.quality).toBe('register_decrease');
     expect(p.decrease).toBeDefined();
   });
-  it('quality precedence: estimated > overflow > clock_suspect > good', () => {
+  it('quality precedence: register_decrease > estimated > overflow > clock_suspect > good', () => {
     expect(
       processRegister({ registerMilli: 1n, unit: 'm3', estimated: true }, base, { clockSuspect: true }).quality,
     ).toBe('estimated_by_gateway');

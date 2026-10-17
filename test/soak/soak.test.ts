@@ -166,6 +166,7 @@ describe('soak: 300 meters × 15 min × 30 days with network chaos', () => {
     expect(tb.ingest.duplicates).toBeGreaterThan(0);
     expect(tb.ingest.qualities.get('overflow_corrected')).toBeGreaterThan(0);
     expect(tb.ingest.events.some((e) => e.type === 'tamper' && e.meterId === ids[2])).toBe(true);
+    expect(tb.ingest.qualities.get('register_decrease')).toBe(1); // the swap reading, sent unchanged (CR-007)
     // resource budgets (master plan §5). This process also hosts the broker, the TLS server side, the
     // reference ingest and the test runner, so its RSS is only bounded loosely here (no leak over 30
     // days); the agent process alone is measured against 200 MB in budget.test.ts. CPU per 15-min cycle (everything included) × 10 for a

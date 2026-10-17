@@ -5,7 +5,14 @@ import { describe, expect, it } from 'vitest';
 import { crc16, crcOk } from '../../src/drivers/modbus/crc.js';
 import { ModbusMaster } from '../../src/drivers/modbus/master.js';
 import { ModbusMeterDriver } from '../../src/drivers/modbus/modbus-driver.js';
-import { BUILTIN_MAPS, planBlocks, type RegisterMap, validateMap } from '../../src/drivers/modbus/register-map.js';
+import {
+  BUILTIN_MAPS,
+  mapForMeter,
+  mapFromCustom,
+  planBlocks,
+  type RegisterMap,
+  validateMap,
+} from '../../src/drivers/modbus/register-map.js';
 import {
   buildReadRequest,
   expectedResponseLength,
@@ -113,8 +120,8 @@ describe('RTU framing', () => {
 describe('register maps', () => {
   it('plans SDM120 reads as two blocks (0–13, 70–73)', () => {
     expect(planBlocks(BUILTIN_MAPS.eastron_sdm120!)).toEqual([
-      { start: 0, count: 14 },
-      { start: 70, count: 4 },
+      { functionCode: 4, start: 0, count: 14 },
+      { functionCode: 4, start: 70, count: 4 },
     ]);
     expect(Object.keys(BUILTIN_MAPS).sort()).toEqual(['eastron_sdm120', 'eastron_sdm230']);
   });
@@ -122,7 +129,9 @@ describe('register maps', () => {
     const base = BUILTIN_MAPS.eastron_sdm120!;
     expect(() => validateMap({ ...base, functionCode: 6 } as unknown as RegisterMap)).toThrow();
     expect(() => validateMap({ ...base, driver: 'Bad Name' })).toThrow();
-    expect(() => validateMap({ ...base, register: { ...base.register, type: 'float64' as 'float32' } })).toThrow();
+    expect(() => validateMap({ ...base, register: { ...base.register, type: 'float128' as 'float32' } })).toThrow();
+    expect(() => validateMap({ ...base, register: { ...base.register, functionCode: 6 as 3 } })).toThrow();
+    expect(() => validateMap({ ...base, register: { ...base.register, type: 'uint64', address: 0xfffd } })).toThrow();
   });
 });
 
@@ -237,5 +246,90 @@ describe('Linux tty transport', () => {
     expect(LinuxTtyTransport.sttyArgs({ device: '/dev/ttyUSB1', baud: 19200, parity: 'even' })).toEqual(
       expect.arrayContaining(['parenb', '-parodd', '-cstopb']),
     );
+  });
+});
+
+describe('custom register maps (CR-005)', () => {
+  const custom = (over: Partial<MeterConfig> = {}): MeterConfig => ({
+    meterId: '0192a000-0000-7000-8000-00000000c001',
+    roomCode: 'MAIN-E',
+    driver: 'modbus_generic',
+    bus: 'rs485-1',
+    address: 3,
+    unit: 'kwh',
+    registerMap: 'custom',
+    scale: '1',
+    customRegisterMap: {
+      energy: { address: 342, function: 'input', dataType: 'uint64', wordOrder: 'little_endian', scale: '0.01' },
+      voltage: { address: 0, function: 'holding', dataType: 'float32', wordOrder: 'big_endian', scale: '1' },
+      power: { address: 10, function: 'holding', dataType: 'int32', wordOrder: 'little_endian', scale: '0.1' },
+    },
+    ...over,
+  });
+
+  it('builds a map with per-register function codes and plans one block per address space', () => {
+    const m = mapFromCustom(custom());
+    expect(m.register).toMatchObject({
+      address: 342,
+      type: 'uint64',
+      functionCode: 4,
+      wordOrder: 'little',
+      unit: 'kwh',
+    });
+    expect(Object.keys(m.extras).sort()).toEqual(['powerW', 'voltage']);
+    expect(planBlocks(m)).toEqual([
+      { functionCode: 3, start: 0, count: 12 },
+      { functionCode: 4, start: 342, count: 4 },
+    ]);
+    expect(m.probe).toEqual({ address: 342, count: 4 });
+  });
+
+  it('mapForMeter picks the custom map, else the built-in one, else refuses', () => {
+    expect(mapForMeter(custom()).model).toMatch(/custom map/);
+    expect(mapForMeter(meter(21)).driver).toBe('eastron_sdm120');
+    expect(() => mapForMeter(meter(21, { driver: 'acme_x' }))).toThrow(/unknown Modbus driver/);
+    expect(() => mapFromCustom(custom({ customRegisterMap: undefined }))).toThrow(/without customRegisterMap/);
+  });
+
+  it('reads a custom-mapped meter over RTU: uint64 low-word-first energy, holding extras, exact scale', async () => {
+    const [a, b] = virtualSerialPair();
+    const requests: Array<[number, number, number]> = [];
+    // energy = 1234567890 (× 0.01 = 12345678.90 kWh) as uint64, words least significant first
+    const energy = Buffer.alloc(8);
+    energy.writeBigUInt64BE(1_234_567_890n);
+    const lowFirst = Buffer.concat([
+      energy.subarray(6, 8),
+      energy.subarray(4, 6),
+      energy.subarray(2, 4),
+      energy.subarray(0, 2),
+    ]);
+    const sim = new ModbusSlaveSimulator(b, (addr, fn, start, count) => {
+      requests.push([fn, start, count]);
+      if (addr !== 3) return null;
+      if (fn === 4 && start === 342) return lowFirst;
+      if (fn === 3 && start === 0) {
+        const img = float32Registers([[0, 229.04]], count, 0);
+        const p = Buffer.alloc(4);
+        p.writeInt32BE(7105); // 710.5 W, low word first
+        p.copy(img, 22, 0, 2);
+        p.copy(img, 20, 2, 4);
+        return img;
+      }
+      return 2;
+    });
+    await sim.start();
+    const master = new ModbusMaster(a, { baud: 9600, timeoutMs: 100, interFrameMs: 1 });
+    await master.open();
+    const m = custom();
+    const drv = new ModbusMeterDriver(mapForMeter(m), master);
+    const r = await drv.read(m);
+    expect(formatMilli(r.registerMilli)).toBe('12345678.900');
+    expect(r.extra).toEqual({ voltage: 229, powerW: 711 });
+    expect(requests).toEqual([
+      [3, 0, 12],
+      [4, 342, 4],
+    ]);
+    await drv.probe(m);
+    expect(requests.at(-1)).toEqual([4, 342, 4]);
   });
 });

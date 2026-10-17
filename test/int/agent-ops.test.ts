@@ -60,6 +60,8 @@ describe('E1.3 — commands, config, health and pulse meters through the broker'
     const ul = command(gatewayId, 'upload_logs', { sinceHours: 1 });
     await waitFor(() => acksOf(ul).includes('done'), 10_000);
     const body = [...tb.api.uploads.values()].at(-1)!;
+    const done = tb.ingest.acks.find((a) => a.cmdId === ul && a.status === 'done')!.result as Record<string, unknown>;
+    expect(done).toMatchObject({ bytes: body.length, fileId: [...tb.api.uploads.keys()].at(-1) });
     const text = gunzipSync(body).toString();
     expect(text).toContain('getproperty-edge log bundle');
     expect(text).toContain('config applied');

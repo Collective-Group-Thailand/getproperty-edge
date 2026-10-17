@@ -5,12 +5,15 @@ import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
  * the canonical JSON of the manifest without `signature` (keys sorted, no whitespace) — the same
  * primitive as minisign, with node:crypto only.
  */
+/** Release channel of the artefact (protocol §6); the rollout ring (canary → pilot → all, D-183) is the api's. */
+export const OTA_CHANNELS = ['stable', 'beta', 'canary'] as const;
+export const OTA_ARCHES = ['arm64', 'x64', 'armv7'] as const;
+
 export interface OtaManifest {
   schema: 1;
   version: string;
-  /** Fleet ring (D-131): canary | pilot | all */
-  channel: string;
-  arch: 'arm64' | 'x64';
+  channel: (typeof OTA_CHANNELS)[number];
+  arch: (typeof OTA_ARCHES)[number];
   artifact: { url: string; sha256: string; size: number };
   minAgentVersion?: string;
   releasedAt: string;
@@ -99,6 +102,9 @@ export function verifyManifest(
   if (!ok) throw new OtaVerifyError('manifest signature invalid');
   if (m.schema !== 1) throw new OtaVerifyError(`unsupported manifest schema ${String(m.schema)}`);
   if (!SEMVER.test(m.version)) throw new OtaVerifyError('bad version');
+  if (!(OTA_CHANNELS as readonly string[]).includes(m.channel))
+    throw new OtaVerifyError(`unknown channel ${String(m.channel)}`);
+  if (!(OTA_ARCHES as readonly string[]).includes(m.arch)) throw new OtaVerifyError(`unknown arch ${String(m.arch)}`);
   if (!m.artifact || !/^[0-9a-f]{64}$/.test(m.artifact.sha256) || !(m.artifact.size > 0))
     throw new OtaVerifyError('bad artifact');
   if (!/^https:\/\//.test(m.artifact.url) && !/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(m.artifact.url))

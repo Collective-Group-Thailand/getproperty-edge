@@ -14,8 +14,9 @@ export interface ProcessedRegister {
 
 /**
  * Register maths before enqueue (D-030): rollover detection with a persisted offset
- * (`overflow_corrected`), monotonic sanity (a decrease is flagged, never dropped) and quality precedence
- * estimated_by_gateway > overflow_corrected > clock_suspect > good.
+ * (`overflow_corrected`), monotonic sanity (a decrease is sent unchanged with `register_decrease`, never
+ * dropped — CR-007; the cloud routes it to the owner review queue) and quality precedence
+ * register_decrease > estimated_by_gateway > overflow_corrected > clock_suspect > good.
  */
 export function processRegister(
   dr: DriverReading,
@@ -38,16 +39,17 @@ export function processRegister(
     reg = reg % (REGISTER_MAX_MILLI + 1n);
     overflow = true;
   }
-  const quality: ReadingQuality = dr.estimated
-    ? 'estimated_by_gateway'
-    : overflow
-      ? 'overflow_corrected'
-      : flags.clockSuspect
-        ? 'clock_suspect'
-        : 'good';
+  const decreased = st.lastRegisterMilli !== null && reg < st.lastRegisterMilli && !overflow;
+  const quality: ReadingQuality = decreased
+    ? 'register_decrease'
+    : dr.estimated
+      ? 'estimated_by_gateway'
+      : overflow
+        ? 'overflow_corrected'
+        : flags.clockSuspect
+          ? 'clock_suspect'
+          : 'good';
   const out: ProcessedRegister = { registerMilli: reg, rawMilli: raw, rolloverOffsetMilli: offset, quality };
-  if (st.lastRegisterMilli !== null && reg < st.lastRegisterMilli && !overflow) {
-    out.decrease = { previousMilli: st.lastRegisterMilli, currentMilli: reg };
-  }
+  if (decreased) out.decrease = { previousMilli: st.lastRegisterMilli!, currentMilli: reg };
   return out;
 }

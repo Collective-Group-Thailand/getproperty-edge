@@ -59,7 +59,8 @@ describe('E1.4 — OTA through the broker, cold start budget', () => {
       priv,
       'gp-ota-int',
     );
-    tb.api.files.set('/v1/device/ota/manifest', {
+    const releaseId = randomUUID();
+    tb.api.files.set(`/v1/device/ota/manifest?releaseId=${releaseId}`, {
       body: Buffer.from(JSON.stringify(manifest)),
       type: 'application/json',
     });
@@ -79,7 +80,8 @@ describe('E1.4 — OTA through the broker, cold start budget', () => {
     const cmd = JSON.stringify({
       cmdId,
       type: 'ota_apply',
-      args: { manifestUrl: `${tb.api.baseUrl}/v1/device/ota/manifest` },
+      // protocol §6: `<api>/v1/device/ota/manifest?releaseId=…`; a relative URL resolves against the API
+      args: { manifestUrl: `/v1/device/ota/manifest?releaseId=${releaseId}` },
       issuedAt: new Date().toISOString(),
     });
     for (let i = 0; i < 10 && !tb.ingest.acks.some((a) => a.cmdId === cmdId); i++) {

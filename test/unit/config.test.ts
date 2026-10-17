@@ -91,7 +91,7 @@ describe('config validation', () => {
         },
       ],
     };
-    expect(semanticErrors(cfg, cat)).toEqual([]);
+    expect(semanticErrors(cfg, driverCatalogue())).toEqual([]);
   });
   it('reports every semantic problem', () => {
     const base = simConfig(meterIds(3));
@@ -101,7 +101,23 @@ describe('config validation', () => {
       meters: [
         { ...base.meters[0]!, address: 5 },
         { ...base.meters[1]!, address: 5 },
-        { ...base.meters[2]!, driver: 'acme_x', registerMap: 'custom' },
+        { ...base.meters[2]!, driver: 'acme_x' },
+        {
+          ...base.meters[2]!,
+          meterId: '0192a000-0000-7000-8000-0000000000dd',
+          address: 9,
+          driver: 'eastron_sdm120',
+          customRegisterMap: {
+            energy: { address: 1, function: 'input', dataType: 'uint32', wordOrder: 'big_endian', scale: '1' },
+          },
+        },
+        {
+          ...base.meters[2]!,
+          meterId: '0192a000-0000-7000-8000-0000000000ee',
+          address: 10,
+          driver: 'modbus_generic',
+          registerMap: 'custom',
+        },
         { ...base.meters[0]!, meterId: '0192a000-0000-7000-8000-0000000000aa', bus: 'nope' },
         {
           ...base.meters[0]!,
@@ -116,7 +132,8 @@ describe('config validation', () => {
     const errs = semanticErrors(cfg, cat).join('\n');
     expect(errs).toMatch(/address 5 already used/);
     expect(errs).toMatch(/unknown Modbus driver acme_x/);
-    expect(errs).toMatch(/registerMap "custom"/);
+    expect(errs).toMatch(/customRegisterMap is only allowed with registerMap "custom"/);
+    expect(errs).toMatch(/invalid custom register map: registerMap "custom" without customRegisterMap/);
     expect(errs).toMatch(/unknown bus nope/);
     expect(errs).toMatch(/pin required/);
     expect(errs).toMatch(/initialRegister required/);
@@ -195,5 +212,22 @@ describe('ConfigManager', () => {
     expect(Date.now() - t).toBeLessThan(5000);
     if (out.status === 'applied') expect(out.unreachable.length).toBeGreaterThan(0);
     await mgr.stop();
+  });
+  it('accepts a custom register map on a Modbus bus with any driver label (CR-005)', () => {
+    const base = simConfig(meterIds(1));
+    const cfg: GatewayConfig = {
+      ...base,
+      meters: [
+        {
+          ...base.meters[0]!,
+          driver: 'modbus_generic',
+          registerMap: 'custom',
+          customRegisterMap: {
+            energy: { address: 342, function: 'input', dataType: 'float32', wordOrder: 'big_endian', scale: '1' },
+          },
+        },
+      ],
+    };
+    expect(semanticErrors(cfg, driverCatalogue())).toEqual([]);
   });
 });

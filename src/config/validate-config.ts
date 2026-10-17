@@ -1,3 +1,4 @@
+import { mapFromCustom } from '../drivers/modbus/register-map.js';
 import type { GatewayConfig } from '../protocol/types.js';
 
 export interface DriverCatalogue {
@@ -28,10 +29,17 @@ export function semanticErrors(cfg: GatewayConfig, drivers: DriverCatalogue): st
       errors.push(`${where}: unknown bus ${m.bus}`);
       continue;
     }
-    if (m.registerMap === 'custom')
-      errors.push(`${where}: registerMap "custom" is not supported by this agent (CR-005)`);
+    if (m.registerMap !== 'custom' && m.customRegisterMap)
+      errors.push(`${where}: customRegisterMap is only allowed with registerMap "custom" (CR-005)`);
     if (bus.type === 'modbus_rtu') {
-      if (!drivers.modbus.has(m.driver)) errors.push(`${where}: unknown Modbus driver ${m.driver}`);
+      if (m.registerMap === 'custom') {
+        // CR-005: the map travels in the config; the driver name is only a label for the model.
+        try {
+          mapFromCustom(m);
+        } catch (err) {
+          errors.push(`${where}: invalid custom register map: ${(err as Error).message}`);
+        }
+      } else if (!drivers.modbus.has(m.driver)) errors.push(`${where}: unknown Modbus driver ${m.driver}`);
       if (m.address === undefined) errors.push(`${where}: address required on a modbus_rtu bus`);
       else {
         const k = `${m.bus}:${m.address}`;
@@ -40,6 +48,7 @@ export function semanticErrors(cfg: GatewayConfig, drivers: DriverCatalogue): st
       }
     } else if (bus.type === 'gpio') {
       if (!drivers.pulse.has(m.driver)) errors.push(`${where}: driver ${m.driver} cannot run on a gpio bus`);
+      if (m.registerMap === 'custom') errors.push(`${where}: a custom register map needs a modbus_rtu bus`);
       if (m.pin === undefined) errors.push(`${where}: pin required on a gpio bus`);
       else if (pins.has(m.pin)) errors.push(`${where}: pin ${m.pin} already used`);
       else pins.add(m.pin);

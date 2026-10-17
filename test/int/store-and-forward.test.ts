@@ -28,9 +28,9 @@ describe('E1.1 acceptance — store-and-forward over MQTT 5 + mTLS', () => {
     for (const f of ['device.key', 'device.crt', 'ca.pem']) expect(statSync(join(dir, f)).mode & 0o777).toBe(0o600);
     await waitFor(() => tb.broker.connectedClients().includes(`gw-${gatewayId}`));
     expect(tb.api.calls).toContain('POST /v1/device/bootstrap');
-    // one-time code: a second bootstrap with the same code is refused
+    // one-time code: a second bootstrap with the same code is refused (401, protocol §1)
     const res = await fetchJson(tb, '/v1/device/bootstrap', { provisioningCode: 'X', csrPem: '' });
-    expect(res).toBe(422);
+    expect(res).toBe(401);
     await agent.stop();
   });
 
@@ -117,6 +117,25 @@ describe('E1.1 acceptance — store-and-forward over MQTT 5 + mTLS', () => {
     await waitFor(() => ids.every((id) => tb.ingest.maxSeq(id) === 3), 10_000);
     expect(tb.ingest.gaps()).toEqual([]);
     await agent.stop();
+  });
+
+  it('cold start without a broker: config pulled over HTTPS (GET /v1/device/config), readings via the batch fallback', async () => {
+    const clock = new VirtualClock(T0);
+    const ids = meterIds(3, '0192a000-0000-7000-8003');
+    const { agent, gatewayId } = tb.agent({ clock, env: { httpsFallbackAfterS: 1, configPullAfterS: 1 } });
+    tb.api.configs.set(gatewayId, simConfig(ids, 4));
+    await tb.broker.kill();
+    try {
+      await agent.start();
+      await waitFor(() => agent.config.version() === 4, 15_000);
+      expect(tb.api.calls).toContain('GET /v1/device/config');
+      await waitFor(() => ids.every((id) => tb.ingest.maxSeq(id) === 1), 15_000);
+      expect(agent.forwarder!.usingHttpsFallback).toBe(true);
+      expect(agent.link!.connected).toBe(false);
+    } finally {
+      await agent.stop();
+      await tb.broker.start();
+    }
   });
 
   it('LWT: the broker publishes offline_lwt on /health when the gateway vanishes', async () => {

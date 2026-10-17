@@ -2,7 +2,14 @@ import type { MeterConfig } from '../../protocol/types.js';
 import { applyScale, parseMilli } from '../../util/decimal.js';
 import { type DriverReading, type MeterDriver, MeterReadError } from '../types.js';
 import type { ModbusMaster } from './master.js';
-import { type Block, decodeExtras, decodeRegisterMilli, planBlocks, type RegisterMap } from './register-map.js';
+import {
+  type Block,
+  type BlockData,
+  decodeExtras,
+  decodeRegisterMilli,
+  planBlocks,
+  type RegisterMap,
+} from './register-map.js';
 import { ModbusCrcError, ModbusExceptionError, ModbusFrameError, ModbusTimeoutError } from './rtu.js';
 
 /** Modbus RTU meter driver driven by a register map (one instance per model per bus). */
@@ -20,12 +27,12 @@ export class ModbusMeterDriver implements MeterDriver {
 
   async read(meter: MeterConfig): Promise<DriverReading> {
     const address = requireAddress(meter);
-    const data = new Map<number, Buffer>();
+    const data: BlockData[] = [];
     for (const b of this.blocks) {
-      data.set(
-        b.start,
-        await this.call(() => this.master.readRegisters(address, this.map.functionCode, b.start, b.count)),
-      );
+      data.push({
+        block: b,
+        data: await this.call(() => this.master.readRegisters(address, b.functionCode, b.start, b.count)),
+      });
     }
     let registerMilli: bigint;
     try {

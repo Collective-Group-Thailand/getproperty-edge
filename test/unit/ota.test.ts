@@ -85,6 +85,13 @@ describe('OTA manifest', () => {
     expect(() => verifyManifest(manifest({ minAgentVersion: '0.1.5' }), TRUSTED, ctx)).toThrow(/requires/);
     expect(() => verifyManifest(manifest(), {}, ctx)).toThrow(/not trusted/);
   });
+  it('accepts the protocol §6 channels and refuses unknown channels/architectures (signed or not)', () => {
+    for (const channel of ['stable', 'beta', 'canary'] as const)
+      expect(verifyManifest(manifest({ channel }), TRUSTED, ctx).channel).toBe(channel);
+    expect(() => verifyManifest(manifest({ channel: 'all' as 'stable' }), TRUSTED, ctx)).toThrow(/unknown channel/);
+    expect(() => verifyManifest(manifest({ arch: 'mips' as 'x64' }), TRUSTED, ctx)).toThrow(/unknown arch/);
+    expect(() => verifyManifest(manifest({ arch: 'armv7' }), TRUSTED, ctx)).toThrow(/this gateway is arm64/);
+  });
   it('compares semver with pre-releases', () => {
     expect(compareSemver('1.4.2', '1.4.10')).toBe(-1);
     expect(compareSemver('1.0.0-rc.2', '1.0.0')).toBe(-1);

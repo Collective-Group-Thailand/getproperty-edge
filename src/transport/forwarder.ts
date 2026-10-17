@@ -13,6 +13,13 @@ import { isoWithOffset } from '../util/time.js';
 import type { DeviceApi } from './https/device-api.js';
 import type { Link } from './link.js';
 
+/** `POST /v1/device/readings/batch` answer (protocol §6, CR-009). */
+export interface ReadingsBatchResult {
+  accepted: number;
+  duplicates: number;
+  rejected: Array<{ meterId: string; seq: number; reason: string }>;
+}
+
 export interface ForwarderOptions {
   gatewayId: string;
   queue: ReadingQueue;
@@ -241,13 +248,20 @@ export class Forwarder extends EventEmitter {
       );
       try {
         const bearer = this.o.tokens ? await this.o.tokens.get() : undefined;
-        await api.json('POST', '/v1/device/readings/batch', env, {
+        const res = await api.json<ReadingsBatchResult | undefined>('POST', '/v1/device/readings/batch', env, {
           mtls: true,
           ...(bearer ? { bearer } : {}),
           idempotencyKey: `${batch.readings[0]!.meterId}:${batch.readings[0]!.seq}:${batch.ids.length}`,
         });
+        // Any 2xx is durable (CR-009): accepted + duplicates are stored; `rejected` readings were refused
+        // for good (unbound meter, schema) and kept as dead letters by the api — re-sending cannot help.
         this.o.queue.ack(batch.ids);
         this.emit('acked', batch.readings.length);
+        if (res?.rejected?.length)
+          this.o.logger.warn(
+            { rejected: res.rejected.slice(0, 20), count: res.rejected.length },
+            'HTTPS fallback: readings refused by the cloud (dead-lettered there)',
+          );
       } catch (err) {
         this.o.queue.rewind();
         this.o.logger.warn({ err: (err as Error).message }, 'HTTPS fallback batch failed');

@@ -14,9 +14,12 @@ export function renewalDueAt(notBefore: number, notAfter: number): number {
   return Math.min(d.getTime(), notAfter - 30 * DAY);
 }
 
+/** `POST /v1/device/certificate/renew` answer (CR-003, done in api A `13be5a7`). */
 export interface RenewResponse {
   certificatePem: string;
   caChainPem: string;
+  /** Informational; the agent reads validity from the certificate itself. */
+  notAfter?: string;
 }
 
 /** Checks daily; renews with a fresh key + CSR over mTLS (`POST /v1/device/certificate/renew`, CR-003). */

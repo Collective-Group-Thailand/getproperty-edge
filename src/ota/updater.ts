@@ -73,6 +73,7 @@ export class OtaUpdater {
       const msg = (err as Error).message;
       this.d.event('ota_failed', err instanceof OtaVerifyError ? 'critical' : 'warning', msg, {
         ...(manifest ? { version: manifest.version } : {}),
+        error: msg,
         manifestUrl,
       });
       throw err;
@@ -89,6 +90,7 @@ export class OtaUpdater {
         version: rb.version,
         fromVersion: rb.fromVersion,
         reason: rb.reason,
+        error: rb.reason,
       });
     const p = await this.d.slots.pending();
     if (!p) return 'none';

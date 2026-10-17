@@ -93,7 +93,9 @@ describe('agent process resource budget', () => {
       }
     }, 100);
     const start = Date.now();
-    await waitFor(() => tb.ingest.accepted >= backlog, 120_000, 50);
+    // drained = the backlog plus the boot read of every meter (otherwise the boot read, delivered right
+    // after the backlog, would be counted as the steady-state cycle over a ~0-s window)
+    await waitFor(() => tb.ingest.accepted >= backlog + METERS, 120_000, 50);
     const drainS = (Date.now() - start) / 1000;
     const cpuAfterDrain = cpuTicks(pid);
     // steady state: one full 60-s polling cycle of 300 meters after the drain

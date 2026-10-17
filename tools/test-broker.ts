@@ -39,7 +39,7 @@ export function topicMatches(filter: string, topic: string): boolean {
   return f.length === t.length;
 }
 
-/** Protocol §1 ACL (+ cmd/ack, see contract request CR-006): gateways publish only under their own id. */
+/** Protocol §1 ACL: gateways publish only to `gp/v1/<id>/+` and, explicitly, `gp/v1/<id>/cmd/ack` (CR-006). */
 export function aclAllows(cn: string, action: 'publish' | 'subscribe', topic: string): boolean {
   if (cn === 'ingest' || cn === 'cloud') return true;
   const m = /^gw-([0-9a-f-]{36})$/.exec(cn);

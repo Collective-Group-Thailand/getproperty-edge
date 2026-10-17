@@ -11,6 +11,8 @@ export interface AgentEnv {
   mqttUrlOverride: string | undefined;
   mqttServername: string | undefined;
   httpsFallbackAfterS: number;
+  /** Cold start: fetch `GET /v1/device/config` when no config arrived on MQTT after this long; 0 = off. */
+  configPullAfterS: number;
   queueCapacity: number;
   statusHost: string;
   statusPort: number;
@@ -69,6 +71,7 @@ export function loadEnv(env: NodeJS.ProcessEnv = process.env): AgentEnv {
     mqttUrlOverride: env.GP_MQTT_URL || undefined,
     mqttServername: env.GP_MQTT_SERVERNAME || undefined,
     httpsFallbackAfterS: int('GP_HTTPS_FALLBACK_AFTER_S', env.GP_HTTPS_FALLBACK_AFTER_S, 600, 0, 86_400),
+    configPullAfterS: int('GP_CONFIG_PULL_AFTER_S', env.GP_CONFIG_PULL_AFTER_S, 120, 0, 86_400),
     queueCapacity: int('GP_QUEUE_CAPACITY', env.GP_QUEUE_CAPACITY, 1_000_000, 1000, 20_000_000),
     statusHost: env.GP_STATUS_HOST ?? '0.0.0.0',
     statusPort: int('GP_STATUS_PORT', env.GP_STATUS_PORT, 8080, 0, 65_535),

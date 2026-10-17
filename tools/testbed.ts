@@ -64,6 +64,7 @@ export class Testbed {
       mqttUrlOverride: undefined,
       mqttServername: undefined,
       httpsFallbackAfterS: 0,
+      configPullAfterS: 0,
       queueCapacity: 1_000_000,
       statusHost: '127.0.0.1',
       statusPort: 0,
@@ -99,6 +100,7 @@ export class Testbed {
   /** Publishes a retained config like the cloud does. */
   pushConfig(gatewayId: string, cfg: GatewayConfig): void {
     this.broker.publish(`gp/v1/${gatewayId}/config`, JSON.stringify(cfg), { retain: true });
+    this.api.configs.set(gatewayId, cfg);
   }
 
   async cloudClientCert(): Promise<{ certPem: string; keyPem: string }> {

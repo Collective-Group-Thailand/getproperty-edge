@@ -4,7 +4,7 @@
 //
 //   OTA_SIGNING_KEY_FILE=~/keys/gp-ota-2026.key OTA_KEY_ID=gp-ota-2026 \
 //   GP_OTA_PUBKEYS="$(cat trusted.json)" pnpm image --arch arm64 --node ./node-arm64/bin/node \
-//     --base-url https://releases.getproperty.co/edge --channel canary
+//     --base-url https://releases.getproperty.co/edge --channel canary   # stable | beta | canary (protocol §6)
 import { execFileSync } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -21,7 +21,7 @@ const baseUrl = opt('base-url', 'https://releases.getproperty.invalid/edge');
 const keyFile = process.env.OTA_SIGNING_KEY_FILE;
 const keyId = process.env.OTA_KEY_ID;
 if (!keyFile || !keyId) throw new Error('OTA_SIGNING_KEY_FILE and OTA_KEY_ID are required');
-if (!['canary', 'pilot', 'all'].includes(channel)) throw new Error('--channel canary | pilot | all');
+if (!['stable', 'beta', 'canary'].includes(channel)) throw new Error('--channel stable | beta | canary');
 
 const privateKey = createPrivateKey(readFileSync(keyFile, 'utf8'));
 const pubPem = createPublicKey(privateKey).export({ type: 'spki', format: 'pem' });

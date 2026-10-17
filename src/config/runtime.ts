@@ -1,6 +1,6 @@
 import { ModbusMaster } from '../drivers/modbus/master.js';
 import { ModbusMeterDriver } from '../drivers/modbus/modbus-driver.js';
-import { BUILTIN_MAPS } from '../drivers/modbus/register-map.js';
+import { BUILTIN_MAPS, mapForMeter } from '../drivers/modbus/register-map.js';
 import type { SerialTransport } from '../drivers/modbus/serial.js';
 import { PulseDriver } from '../drivers/pulse/pulse-driver.js';
 import type { PulseSource } from '../drivers/pulse/pulse-source.js';
@@ -67,7 +67,7 @@ export class Runtime {
           });
           this.masters.set(bus.id, master);
         }
-        this.drivers.set(m.meterId, new ModbusMeterDriver(BUILTIN_MAPS[m.driver]!, master));
+        this.drivers.set(m.meterId, new ModbusMeterDriver(mapForMeter(m), master));
       } else if (bus.type === 'gpio') {
         pulseMeters.push(m);
       }
