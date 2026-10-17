@@ -1,0 +1,59 @@
+# getproperty gateway agent — installed by scripts/install.sh
+[Unit]
+Description=getproperty gateway agent (meters -> MQTT store-and-forward)
+Documentation=https://getproperty.co/docs/edge
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+# never give up restarting (field device)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=gpedge
+Group=gpedge
+SupplementaryGroups=dialout gpio
+Environment=GP_STATE_DIR=/var/lib/getproperty-edge
+Environment=GP_OTA_ROOT=/opt/getproperty-edge
+EnvironmentFile=-/etc/getproperty-edge/agent.env
+# A/B updates: roll back a freshly installed slot that cannot reach its health gate
+ExecStartPre=/opt/getproperty-edge/ota-guard.sh
+ExecStart=/opt/getproperty-edge/slots/current/getproperty-edge
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+# 512 MB gateways: budget < 200 MB RSS at 300 meters (docs/SECURITY.md, master plan §5)
+MemoryHigh=250M
+MemoryMax=320M
+UMask=0077
+
+# hardening — the agent needs only its state dir, its install dir (OTA slots), serial/GPIO devices
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/getproperty-edge /opt/getproperty-edge/slots
+ReadWritePaths=-/sys/class/leds
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
+DeviceAllow=char-ttyAMA rw
+DeviceAllow=char-ttyS rw
+DeviceAllow=char-gpiochip rw
+
+[Install]
+WantedBy=multi-user.target

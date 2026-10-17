@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import type { LookupFunction } from 'node:net';
 
 import mqtt, { type IClientOptions, type MqttClient } from 'mqtt';
 
@@ -29,6 +30,8 @@ export interface MqttLinkOptions {
   /** Consecutive failures on one URL before trying the other. */
   failoverAfter?: number;
   servername?: string;
+  /** Custom DNS lookup (tests inject DNS failures). */
+  lookup?: LookupFunction;
   logger: Logger;
   clock?: Clock;
   random?: () => number;
@@ -123,6 +126,7 @@ export class MqttLink extends EventEmitter implements Link {
       will: { topic: topic(gw, 'health'), payload: Buffer.from(lwtPayload()), qos: 1, retain: false },
     };
     if (this.opts.servername) options.servername = this.opts.servername;
+    if (this.opts.lookup) (options as IClientOptions & { lookup?: LookupFunction }).lookup = this.opts.lookup;
     const url = this.currentUrl;
     if (url.startsWith('wss:')) options.wsOptions = { key: creds.key, cert: creds.cert, ca: creds.ca };
     const c = mqtt.connect(url, options);

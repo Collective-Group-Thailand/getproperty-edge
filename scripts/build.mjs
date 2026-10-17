@@ -23,7 +23,12 @@ const result = await build({
   logLevel: 'warning',
   // Optional native/worker transports of pino and mqtt's browser shims are never used by the agent.
   external: ['pino-pretty', 'bufferutil', 'utf-8-validate'],
+  // OTA trust anchors baked in (fail closed when absent): GP_OTA_PUBKEYS='{"keyId":"-----BEGIN PUBLIC KEY-----…"}'
+  define: { __GP_OTA_PUBKEYS__: JSON.stringify(process.env.GP_OTA_PUBKEYS ?? '') },
 });
 
 const bytes = Object.values(result.metafile.outputs).reduce((a, o) => a + o.bytes, 0);
-console.log(`build: dist/getproperty-edge.cjs (${(bytes / 1024).toFixed(0)} KiB)`);
+const keys = process.env.GP_OTA_PUBKEYS ? Object.keys(JSON.parse(process.env.GP_OTA_PUBKEYS)) : [];
+console.log(
+  `build: dist/getproperty-edge.cjs (${(bytes / 1024).toFixed(0)} KiB), OTA keys: ${keys.length ? keys.join(', ') : 'none (OTA disabled)'}`,
+);

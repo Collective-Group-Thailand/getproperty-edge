@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: signed SEA binaries (linux-x64, linux-arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_VERSION: '24.11.1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm gen:protocol:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:int
+      - name: Node linux-arm64 (verified against SHASUMS256)
+        run: |
+          set -euo pipefail
+          base="https://nodejs.org/dist/v${NODE_VERSION}"
+          curl -fsSLO "$base/node-v${NODE_VERSION}-linux-arm64.tar.xz"
+          curl -fsSLO "$base/SHASUMS256.txt"
+          grep " node-v${NODE_VERSION}-linux-arm64.tar.xz\$" SHASUMS256.txt | sha256sum -c -
+          tar -xJf "node-v${NODE_VERSION}-linux-arm64.tar.xz"
+      - name: Sign and build images
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+          OTA_KEY_ID: ${{ vars.OTA_KEY_ID }}
+          GP_OTA_PUBKEYS: ${{ vars.GP_OTA_PUBKEYS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$OTA_SIGNING_KEY" > "$RUNNER_TEMP/ota.key"
+          export OTA_SIGNING_KEY_FILE="$RUNNER_TEMP/ota.key"
+          pnpm image --arch x64 --channel canary --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          pnpm image --arch arm64 --node "node-v${NODE_VERSION}-linux-arm64/bin/node" --channel canary \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          rm -f "$RUNNER_TEMP/ota.key"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/release/*/* --generate-notes

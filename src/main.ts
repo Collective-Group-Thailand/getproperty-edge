@@ -1,15 +1,22 @@
 import { Agent } from './agent.js';
 import { loadEnv } from './env.js';
+import { LoopWatchdog } from './health/loop-watchdog.js';
 import { SystemdClockSync } from './scheduler/clock-sync.js';
 import { createLogger, LogRing } from './util/logger.js';
 import { AGENT_VERSION } from './version.js';
 
 /** Process entry (SEA binary / `pnpm dev`): env → agent; SIGTERM/SIGINT stop gracefully. */
 async function main(): Promise<void> {
+  if (process.argv.includes('--version')) {
+    process.stdout.write(`${AGENT_VERSION}\n`);
+    return;
+  }
   const env = loadEnv();
   const ring = new LogRing();
   const logger = createLogger(env.logLevel, ring);
   logger.info({ version: AGENT_VERSION, mode: env.driverMode, stateDir: env.stateDir }, 'getproperty-edge starting');
+  const watchdog = new LoopWatchdog(Number(process.env.GP_WATCHDOG_S ?? 90));
+  watchdog.start();
   const clockSync = new SystemdClockSync(logger);
   clockSync.start();
   const agent = new Agent({ env, logger, logRing: ring, clockSync });
@@ -19,6 +26,7 @@ async function main(): Promise<void> {
     stopping = true;
     logger.info({ sig }, 'stopping');
     clockSync.stop();
+    void watchdog.stop();
     agent.stop().then(
       () => process.exit(0),
       (err: unknown) => {

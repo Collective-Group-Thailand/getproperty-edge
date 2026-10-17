@@ -1,3 +1,4 @@
+import type { IncomingMessage } from 'node:http';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest, type RequestOptions } from 'node:https';
 
@@ -67,6 +68,33 @@ export class DeviceApi {
       throw new ApiError(res.status, parsed, `${method} ${path} → ${res.status} ${title}`.trim());
     }
     return parsed as T;
+  }
+
+  /** GET streamed (OTA artefacts): resolves with the response once headers arrive; non-2xx rejects. */
+  stream(url: URL, mtls: boolean, headers: Record<string, string> = {}): Promise<IncomingMessage> {
+    assertSecureUrl(url);
+    const creds = mtls ? this.opts.credentials?.() : undefined;
+    const options: RequestOptions = { method: 'GET', headers, timeout: this.opts.timeoutMs ?? 30_000 };
+    if (url.protocol === 'https:') {
+      if (this.opts.ca) options.ca = this.opts.ca;
+      if (creds) {
+        options.key = creds.key;
+        options.cert = creds.cert;
+      }
+    }
+    const fn = url.protocol === 'https:' ? httpsRequest : httpRequest;
+    return new Promise((resolve, reject) => {
+      const req = fn(url, options, (res) => {
+        const status = res.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          res.resume();
+          reject(new ApiError(status, null, `GET ${url.pathname} → ${status}`));
+        } else resolve(res);
+      });
+      req.on('timeout', () => req.destroy(new Error(`timeout after ${options.timeout} ms`)));
+      req.on('error', reject);
+      req.end();
+    });
   }
 
   /** Raw request; `mtls` presents the device certificate. Used for presigned PUTs (mtls=false). */

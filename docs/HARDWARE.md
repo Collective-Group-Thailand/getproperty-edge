@@ -75,3 +75,25 @@ re-baselines the counter; a changed `litresPerPulse` re-baselines at the current
 
 `GP_LED=<name>` drives `/sys/class/leds/<name>/brightness` (gpio-leds overlay) for the `identify` command
 (3 short + 1 long blinks, repeated for `durationS`, default 30 s).
+
+## Image build and install
+
+1. `pnpm build:sea` produces `dist/getproperty-edge-<version>-linux-x64` (smoke-tested with `--version`).
+2. For the ARM64 gateway, download the official Node 24 linux-arm64 tarball, verify it against
+   `SHASUMS256.txt` (signed by the Node.js release keys), and inject the same SEA blob:
+   `pnpm build:sea --arch arm64 --node ./node-v24.x-linux-arm64/bin/node` (the blob has no snapshot or
+   code cache, so it is architecture-independent). Smoke-test on the gateway: `./getproperty-edge --version`.
+3. `pnpm image` signs a release (`OTA_SIGNING_KEY_FILE`, `OTA_KEY_ID`, `--channel canary|pilot|all`,
+   `--base-url`): `dist/release/<version>/` holds the binary, `manifest-<arch>.json` (ed25519-signed),
+   `SHA256SUMS`, `install.sh`, `ota-guard.sh` and the systemd unit. The api's OTA rollout serves the
+   manifest at `/v1/device/ota/manifest` (CR-011).
+4. On a fresh gateway (Raspberry Pi OS Lite 64-bit / Debian 12 arm64, `apt install gpiod`):
+   `sudo ./install.sh --binary ./getproperty-edge-<version>-linux-arm64 --api-url https://api.getproperty.co`.
+   It creates `gpedge`, `/var/lib/getproperty-edge` (0700), `/opt/getproperty-edge/slots/{a,b}` + `current`,
+   the root-owned OTA guard, the systemd unit, udev rules (RS485 adapters → `dialout` + `/dev/getproperty-rs485-N`,
+   gpiochip → `gpio`, LED brightness), NTP (th.pool.ntp.org) and the hardware watchdog (`RuntimeWatchdogSec=30`).
+5. For a fleet image: run the installer in the image build (chroot), leave `/var/lib/getproperty-edge`
+   empty — every gateway generates its own key at first boot.
+
+Budgets measured (`pnpm test:soak`, x64 dev host): agent RSS peak 170 MB while draining a 2-day backlog
+of 57,600 readings with 300 meters; steady-state CPU 0.3 % at 60-s polling (15× the production rate).

@@ -37,6 +37,28 @@ jobs:
         run: pnpm test:int
       - name: Build
         run: pnpm build
+      - name: Single executable (smoke-tested with --version)
+        run: pnpm build:sea
+
+  soak:
+    name: soak (300 meters × 30 simulated days, chaos) + agent resource budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test:soak
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-report
+          path: test-results/*.json
 
   e2e:
     name: status page e2e (Playwright)

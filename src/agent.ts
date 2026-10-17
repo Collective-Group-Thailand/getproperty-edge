@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import type { LookupFunction } from 'node:net';
 import { join } from 'node:path';
 
 import { CommandDispatcher, type CommandHandler } from './commands/dispatcher.js';
@@ -19,6 +20,10 @@ import type { Identity } from './identity/identity-store.js';
 import { IdentityStore } from './identity/identity-store.js';
 import { CertificateRenewer } from './identity/renewal.js';
 import { DeviceTokenCache } from './identity/token.js';
+import { NodeOtaFs, type OtaFs } from './ota/ota-fs.js';
+import { AbSlots } from './ota/slots.js';
+import { bakedOtaKeys } from './ota/trusted-keys.js';
+import { OtaUpdater } from './ota/updater.js';
 import { buildEvent } from './protocol/envelopes.js';
 import type { BusConfig, CommandAck, DeviceEventSeverity, DeviceEventType, TopicSuffix } from './protocol/types.js';
 import { Outbox } from './queue/outbox.js';
@@ -51,7 +56,7 @@ export interface AgentDeps {
   led?: Led;
   /** Overrides the broker link (tests). */
   linkFactory?: (identity: Identity) => Link & { start(): void; stop(): Promise<void>; restart?(): void };
-  /** Extra command handlers (OTA registers `ota_apply`). */
+  /** Extra or replacement command handlers (tests). */
   extraHandlers?: Partial<Record<string, CommandHandler>>;
   /** Called when a command asks for a process restart (systemd restarts the service). */
   requestExit?: (code: number) => void;
@@ -59,8 +64,16 @@ export interface AgentDeps {
   /** Poll jitter per bus (ms); 0 in tests. */
   jitterMaxMs?: number;
   heartbeatS?: number;
+  /** OTA: trusted manifest keys (default: baked into the build), filesystem, gate. */
+  ota?: { trustedKeys?: Record<string, string>; fs?: OtaFs; gateMs?: number; arch?: string; currentVersion?: string };
   forwarder?: { maxInflight?: number; retryBaseMs?: number; retryMaxMs?: number };
-  mqtt?: { keepaliveS?: number; backoffBaseMs?: number; backoffMaxMs?: number; connectTimeoutMs?: number };
+  mqtt?: {
+    keepaliveS?: number;
+    backoffBaseMs?: number;
+    backoffMaxMs?: number;
+    connectTimeoutMs?: number;
+    lookup?: LookupFunction;
+  };
   statusPage?: boolean;
 }
 
@@ -89,6 +102,7 @@ export class Agent {
   commands: CommandDispatcher | undefined;
   statusPage: StatusPageServer | undefined;
   statusPort: number | undefined;
+  ota: OtaUpdater | undefined;
   private renewer: CertificateRenewer | undefined;
   private readonly metrics: SystemMetrics;
   private readonly startedAt: number;
@@ -279,6 +293,30 @@ export class Agent {
       sendAck: (ack: CommandAck) => this.pushOutbox('cmd/ack', ack),
       handlers: { ...this.builtinHandlers(), ...this.d.extraHandlers },
     });
+    this.ota = new OtaUpdater({
+      slots: new AbSlots(this.d.ota?.fs ?? new NodeOtaFs(), env.otaRoot, env.stateDir),
+      trustedKeys: this.d.ota?.trustedKeys ?? bakedOtaKeys(),
+      currentVersion: this.d.ota?.currentVersion ?? AGENT_VERSION,
+      arch: this.d.ota?.arch ?? process.arch,
+      fetchManifest: async (url) => {
+        const same = new URL(url).origin === new URL(env.apiBaseUrl).origin;
+        return this.api.json('GET', url, undefined, {
+          mtls: same,
+          ...(same ? { bearer: await this.tokens.get() } : {}),
+        });
+      },
+      download: async (url) => this.api.stream(new URL(url), new URL(url).origin === new URL(env.apiBaseUrl).origin),
+      clock: this.clock,
+      logger: this.d.logger,
+      event: (type, severity, message, data) => this.emitEvent(type, severity, { message, data }),
+      requestRestart: () => this.requestRestart(1000),
+      firstHealthAck: () => this.health!.firstAck(),
+      ...(this.d.ota?.gateMs !== undefined ? { gateMs: this.d.ota.gateMs } : {}),
+    });
+    this.commands.addHandler('ota_apply', async (args) => {
+      if (typeof args.manifestUrl !== 'string') throw new Error('args.manifestUrl required');
+      return this.ota!.apply(args.manifestUrl);
+    });
     link.on('message', (suffix: string, payload: Buffer) => {
       if (suffix === 'config') void this.config.apply(payload);
       else if (suffix === 'cmd') void this.commands?.handle(payload);
@@ -297,6 +335,16 @@ export class Agent {
     this.health.start();
     link.start();
     this.renewer.start();
+    void this.ota
+      .onBoot()
+      .catch((err: unknown) => this.d.logger.error({ err: (err as Error).message }, 'OTA boot check failed'));
+  }
+
+  /** Graceful stop, then exit so systemd starts `current` again (restart command, OTA switch/rollback). */
+  requestRestart(delayMs: number): void {
+    setTimeout(() => {
+      void this.stop().finally(() => (this.d.requestExit ?? ((c) => process.exit(c)))(0));
+    }, delayMs).unref();
   }
 
   /** Graceful stop: pollers, pulse flush, link; marks the shutdown clean. */
@@ -394,9 +442,7 @@ export class Agent {
         };
       },
       restart: async () => {
-        setTimeout(() => {
-          void this.stop().finally(() => (this.d.requestExit ?? ((c) => process.exit(c)))(0));
-        }, 2000).unref();
+        this.requestRestart(2000);
         return { restartInS: 2 };
       },
       identify: async (args) => {

@@ -41,6 +41,10 @@ export class CommandDispatcher {
     };
   }
 
+  addHandler(type: CommandType, handler: CommandHandler): void {
+    this.o.handlers[type] = handler;
+  }
+
   async handle(payload: Buffer | string): Promise<CommandAck | null> {
     let cmd: Command;
     try {
