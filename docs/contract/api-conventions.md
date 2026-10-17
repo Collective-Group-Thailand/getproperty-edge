@@ -22,6 +22,7 @@
 | `/v1/admin/*` | platform admin zone of `getproperty-web` (Collective Group staff: tenants, subscriptions, device fleet, tariffs, support, AI usage cost) | `platform` |
 | `/v1/device/*` | gateways (`getproperty-edge`) over HTTPS for provisioning, bootstrap, OTA manifests and large uploads; telemetry itself goes over MQTT (D-130) | `device` (mTLS client certificate; a short-lived JWT is minted at bootstrap) |
 | `/webhooks/*` | payment gateways / banks, slip verification, LINE Messaging, lock vendors, e-Tax provider — signature-verified | none |
+| `/v1/public/*` | marketing pages of `getproperty-web` (price plans, the published tariff ceiling) — anonymous, cacheable, never personal data | none |
 | `/health`, `/docs`, `/docs-json` | ops | none (docs disabled in prod unless `DOCS_ENABLED`) |
 
 A token issued for one audience is rejected on every other prefix (guard checks `aud`). OpenAPI tags are prefixed by surface (`owner.invoices`, `resident.invoices`, `admin.devices`…) so generated types are easy to navigate. Security schemes: `operatorBearer`, `residentBearer`, `technicianBearer`, `platformBearer`, `deviceBearer`.
@@ -75,7 +76,7 @@ The generated OpenAPI document is the product, not a by-product: `getproperty-we
 - Server-sent events authorised by the API (`POST /v1/{surface}/realtime/auth`). Event payloads carry ids + type only (`invoice.paid`, `reading.received`, `device.offline`); the client refetches through the normal API. The owner console subscribes per building; the staff PWA per assigned building; the resident app per lease/unit; the technician app per work order.
 
 ## 7. Device surface (`/v1/device/*`, HTTPS) and MQTT
-- HTTPS is used only for: `POST /v1/device/bootstrap` (provisioning code → certificate signing → device JWT), `GET /v1/device/config` (full config on cold start; incremental changes arrive on MQTT `/config`), `GET /v1/device/ota/manifest`, `POST /v1/device/logs/presign` (log bundle upload), `POST /v1/device/readings/batch` (fallback when MQTT is blocked by the building's network; same envelope as MQTT, same dedup).
+- HTTPS is used only for: `POST /v1/device/bootstrap` (provisioning code → certificate signing → device JWT), `POST /v1/device/token` (mTLS client certificate → short-lived device JWT), `POST /v1/device/certificate/renew`, `GET /v1/device/config` (full config on cold start; incremental changes arrive on MQTT `/config`), `GET /v1/device/ota/manifest`, `POST /v1/device/logs/presign` (log bundle upload), `POST /v1/device/readings/batch` (fallback when MQTT is blocked by the building's network; same envelope as MQTT, same dedup).
 - MQTT topics, payload schemas, QoS, retained flags, dedup keys and buffer rules are in `docs/contract/device-protocol.md`; the JSON Schemas are generated into `contract/device-protocol.json` from the same DTO classes used by the MQTT ingest worker.
 
 ## 8. Tenancy scoping
