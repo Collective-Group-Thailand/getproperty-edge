@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+pnpm-lock.yaml
+test-results
+playwright-report
+src/protocol/types.ts
+src/protocol/schema.ts
+test/fixtures/frames
+# synced from getproperty-api / prompt pack — never reformatted here
+docs/contract/
+docs/decisions.md
+docs/prompts/
+CLAUDE.md
+docs/PROGRESS.md

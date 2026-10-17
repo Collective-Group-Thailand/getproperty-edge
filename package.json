@@ -1,0 +1,62 @@
+{
+  "name": "getproperty-edge",
+  "version": "0.1.0",
+  "description": "getproperty gateway agent — Modbus RTU / pulse meters → MQTT (mTLS) store-and-forward",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "packageManager": "pnpm@10.18.1",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "sim": "tsx src/sim/cli.ts",
+    "gen:protocol": "node scripts/gen-protocol.mjs",
+    "gen:protocol:check": "node scripts/gen-protocol.mjs --check",
+    "lint": "eslint --cache .",
+    "lint:fix": "eslint --cache --fix .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --project unit",
+    "test:int": "vitest run --project int",
+    "test:soak": "vitest run --project soak",
+    "test:e2e": "playwright test",
+    "test:hw": "tsx scripts/test-hw.ts",
+    "build": "node scripts/build.mjs",
+    "build:sea": "node scripts/build-sea.mjs",
+    "image": "node scripts/image.mjs",
+    "ota:keygen": "node scripts/ota-keygen.mjs"
+  },
+  "dependencies": {
+    "@peculiar/x509": "^2.2.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "mqtt": "^5.16.1",
+    "pino": "^10.4.0",
+    "reflect-metadata": "^0.2.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.64.1",
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.13.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-simple-import-sort": "^14.0.0",
+    "globals": "^17.13.0",
+    "mqtt-packet": "^9.0.2",
+    "postject": "1.0.0-alpha.6",
+    "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

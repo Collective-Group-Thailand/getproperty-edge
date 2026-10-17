@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+test-results/
+playwright-report/
+.eslintcache
+*.tsbuildinfo
+*.log
+.env
+.env.*
+!.env.example
+.dev-state/
+*.pem
+!test/fixtures/**/*.pem
