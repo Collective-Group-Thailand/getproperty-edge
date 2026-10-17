@@ -53,3 +53,5 @@ Pass the JSON inline or as a file path in `GP_SIM_CONFIG`.
 ## Running a simulated gateway
 
 - Against getproperty-api's compose EMQX: `GP_DRIVER_MODE=simulator GP_API_URL=http://localhost:3000 GP_PROVISIONING_CODE=<code> pnpm dev`.
+- Fully local (in-process broker + API stub + test CA, no Docker): `pnpm dev:local` — prints the gateway id,
+  pushes a 20-meter config and serves the status page on http://127.0.0.1:8080.

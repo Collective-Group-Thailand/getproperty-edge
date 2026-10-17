@@ -87,6 +87,7 @@ export class Testbed {
     const agent = new Agent({
       logger: silentLogger(),
       jitterMaxMs: 0,
+      statusPage: false,
       mqtt: { backoffBaseMs: 50, backoffMaxMs: 300, connectTimeoutMs: 3000 },
       forwarder: { retryBaseMs: 50, retryMaxMs: 300 },
       ...rest,

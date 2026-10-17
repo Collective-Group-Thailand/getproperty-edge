@@ -2,6 +2,8 @@ import { ModbusMaster } from '../drivers/modbus/master.js';
 import { ModbusMeterDriver } from '../drivers/modbus/modbus-driver.js';
 import { BUILTIN_MAPS } from '../drivers/modbus/register-map.js';
 import type { SerialTransport } from '../drivers/modbus/serial.js';
+import { PulseDriver } from '../drivers/pulse/pulse-driver.js';
+import type { PulseSource } from '../drivers/pulse/pulse-source.js';
 import type { SimulatorDriver } from '../drivers/simulator/simulator-driver.js';
 import type { MeterDriver } from '../drivers/types.js';
 import type { BusConfig, GatewayConfig, MeterConfig } from '../protocol/types.js';
@@ -20,10 +22,13 @@ export interface RuntimeDeps {
   mode: 'hardware' | 'simulator';
   simulator?: SimulatorDriver;
   serialFactory: (bus: BusConfig) => SerialTransport;
+  pulseSourceFactory: () => PulseSource;
   modbusTimeoutMs?: number;
   modbusRetries?: number;
   jitterMaxMs?: number;
+  uncleanStart: () => boolean;
   onResults: (results: ReadResult[]) => void;
+  onPulseOverflow: (meterId: string, hz: number) => void;
 }
 
 export function driverCatalogue(): DriverCatalogue {
@@ -34,6 +39,8 @@ export function driverCatalogue(): DriverCatalogue {
 export class Runtime {
   private readonly masters = new Map<string, ModbusMaster>();
   private readonly drivers = new Map<string, MeterDriver>();
+  private pulse: PulseDriver | undefined;
+  private pulseMeters: MeterConfig[] = [];
   readonly scheduler: Scheduler;
   private opened = false;
 
@@ -42,6 +49,7 @@ export class Runtime {
     private readonly d: RuntimeDeps,
   ) {
     const buses = new Map(config.buses.map((b) => [b.id, b]));
+    const pulseMeters: MeterConfig[] = [];
     for (const m of config.meters) {
       const bus = buses.get(m.bus)!;
       if (d.mode === 'simulator') {
@@ -60,9 +68,21 @@ export class Runtime {
           this.masters.set(bus.id, master);
         }
         this.drivers.set(m.meterId, new ModbusMeterDriver(BUILTIN_MAPS[m.driver]!, master));
-      } else {
-        throw new Error(`${bus.type} meters are not supported by this build`);
+      } else if (bus.type === 'gpio') {
+        pulseMeters.push(m);
       }
+    }
+    if (pulseMeters.length) {
+      this.pulse = new PulseDriver({
+        db: d.db,
+        source: d.pulseSourceFactory(),
+        logger: d.logger,
+        clock: d.clock,
+        uncleanStart: d.uncleanStart(),
+        onOverflow: d.onPulseOverflow,
+      });
+      for (const m of pulseMeters) this.drivers.set(m.meterId, this.pulse);
+      this.pulseMeters = pulseMeters;
     }
     this.scheduler = new Scheduler({
       clock: d.clock,
@@ -76,7 +96,7 @@ export class Runtime {
     });
   }
 
-  /** Opens the buses; throws if a bus cannot be opened. */
+  /** Opens the buses and starts pulse counting; throws if a bus cannot be opened. */
   async open(): Promise<void> {
     for (const [id, m] of this.masters) {
       try {
@@ -85,6 +105,7 @@ export class Runtime {
         throw new Error(`bus ${id}: ${(err as Error).message}`, { cause: err });
       }
     }
+    if (this.pulse) await this.pulse.start(this.pulseMeters);
     this.opened = true;
   }
 
@@ -123,7 +144,12 @@ export class Runtime {
 
   async stop(): Promise<void> {
     await this.scheduler.stop();
+    if (this.pulse) await this.pulse.close();
     if (this.opened) for (const m of this.masters.values()) await m.close().catch(() => undefined);
     this.opened = false;
+  }
+
+  pulseDriver(): PulseDriver | undefined {
+    return this.pulse;
   }
 }

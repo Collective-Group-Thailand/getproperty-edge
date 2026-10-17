@@ -36,3 +36,42 @@ GP_HW_DEVICE=/dev/ttyUSB0 GP_HW_ADDRESS=21 GP_HW_DRIVER=eastron_sdm120 GP_HW_BAU
 Reads the meter three times, prints the register, extras, round-trip time and bus statistics, and with
 `--capture` writes the frames as `test/fixtures/frames/captured-*.hex` (add an `# expect` line and commit
 them so the golden tests run against real captures). Without `GP_HW_DEVICE` it prints "skipped" and exits 0.
+
+## Pulse inputs (water meters) — carrier design (decided in E1.3)
+
+**Decision**: debounce and isolation **in hardware on the carrier**, counting by the Linux agent through the
+GPIO character device (`gpiomon`, libgpiod) — no dedicated MCU for the pilot. Software debounce (30 ms
+default) stays on as the second line. Rationale: water meters with reed/open-collector outputs produce
+≤ 1 pulse/s even at full flow (10 L/pulse at 3 m³/h ≈ 0.08 Hz), far inside what the kernel edge-event
+queue handles; an MCU adds firmware to maintain and a second failure point. Revisit with an MCU or a
+counter IC (e.g. a battery-backed counter) only if a site needs counting across long power cuts
+without the gateway (the agent already flags the first reading after an unclean restart
+`estimated_by_gateway`, D-033).
+
+Per channel (up to **16 channels**, the agent refuses more):
+
+1. Meter output (reed contact / open collector) → 2-wire cable, max ~50 m.
+2. Optocoupler (e.g. PC817 / LTV-817) with a 12 V wetting supply and 2.2 kΩ series resistor — isolates
+   the cable from the SoC and gives the reed enough wetting current.
+3. RC low-pass (10 kΩ / 1 µF, τ = 10 ms) + Schmitt-trigger buffer (74HC14) — removes contact bounce and
+   cable noise; pulses ≥ 50 ms (all common water meters) pass.
+4. GPIO input with the falling edge counted (pull-up on the carrier).
+5. TVS diode on each input pair; channel LED for the installer.
+
+For more than the free GPIOs of the module, the same front end feeds an **MCP23017** I²C expander (16
+inputs, interrupt line to one GPIO); the expander backend is a driver addition behind `PulseSource`, not
+a protocol change. Pilot (Raspberry Pi CM4 carrier): GPIO 17, 27, 22, 23, 24, 25, 5, 6, 12, 13, 16, 19,
+20, 21, 26, 4 on `gpiochip0`.
+
+The agent persists the pulse count every 10 pulses and every 30 s, before each reading and on shutdown;
+the register is `initialRegister + pulses × litresPerPulse`. A new staff-confirmed `initialRegister`
+re-baselines the counter; a changed `litresPerPulse` re-baselines at the current register.
+
+`gpiomon` must be installed (`apt install gpiod`); the service user needs access to `/dev/gpiochip*`
+(`gpio` group, set by `scripts/install.sh`). libgpiod v1 (Debian bookworm / Raspberry Pi OS) and v2
+(trixie) are both supported (version detected at start). UNVERIFIED on the carrier until the pilot build.
+
+## Status LED
+
+`GP_LED=<name>` drives `/sys/class/leds/<name>/brightness` (gpio-leds overlay) for the `identify` command
+(3 short + 1 long blinks, repeated for `durationS`, default 30 s).

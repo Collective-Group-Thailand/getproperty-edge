@@ -11,6 +11,7 @@
   },
   "scripts": {
     "dev": "tsx src/main.ts",
+    "dev:local": "tsx tools/dev-local.ts",
     "sim": "tsx src/sim/cli.ts",
     "gen:protocol": "node scripts/gen-protocol.mjs",
     "gen:protocol:check": "node scripts/gen-protocol.mjs --check",

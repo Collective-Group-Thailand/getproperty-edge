@@ -1,25 +1,33 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { CommandDispatcher, type CommandHandler } from './commands/dispatcher.js';
+import { blinkIdentify, type Led, SimLed, SysfsLed } from './commands/led.js';
+import { LogUploader } from './commands/log-upload.js';
 import { ConfigManager } from './config/config-manager.js';
 import type { Runtime } from './config/runtime.js';
 import { LinuxTtyTransport, type SerialTransport } from './drivers/modbus/serial.js';
+import { GpiomonPulseSource, type PulseSource } from './drivers/pulse/pulse-source.js';
 import { parseSimConfig, type SimConfig } from './drivers/simulator/sim-config.js';
 import { SimulatorDriver } from './drivers/simulator/simulator-driver.js';
 import type { AgentEnv } from './env.js';
+import { HealthReporter } from './health/health-reporter.js';
 import { MeterStatusTracker } from './health/meter-status.js';
+import { type HostProbe, realHost, SystemMetrics } from './health/system-metrics.js';
 import { ensureIdentity, ProvisioningCodeSource } from './identity/bootstrap.js';
 import type { Identity } from './identity/identity-store.js';
 import { IdentityStore } from './identity/identity-store.js';
 import { CertificateRenewer } from './identity/renewal.js';
 import { DeviceTokenCache } from './identity/token.js';
 import { buildEvent } from './protocol/envelopes.js';
-import type { BusConfig, DeviceEventSeverity, DeviceEventType, TopicSuffix } from './protocol/types.js';
+import type { BusConfig, CommandAck, DeviceEventSeverity, DeviceEventType, TopicSuffix } from './protocol/types.js';
 import { Outbox } from './queue/outbox.js';
 import { type NewReading, ReadingQueue } from './queue/reading-queue.js';
 import { alwaysSynced, type ClockSync } from './scheduler/clock-sync.js';
 import { processRegister } from './scheduler/register-math.js';
 import type { ReadResult } from './scheduler/scheduler.js';
+import type { StatusView } from './status-page/render.js';
+import { StatusPageServer } from './status-page/server.js';
 import { type Db, KvStore, openDb } from './storage/db.js';
 import { Forwarder } from './transport/forwarder.js';
 import { DeviceApi } from './transport/https/device-api.js';
@@ -36,15 +44,24 @@ export interface AgentDeps {
   logger: Logger;
   logRing?: LogRing;
   clock?: Clock;
+  host?: HostProbe;
   clockSync?: ClockSync;
   serialFactory?: (bus: BusConfig) => SerialTransport;
+  pulseSourceFactory?: () => PulseSource;
+  led?: Led;
   /** Overrides the broker link (tests). */
   linkFactory?: (identity: Identity) => Link & { start(): void; stop(): Promise<void>; restart?(): void };
+  /** Extra command handlers (OTA registers `ota_apply`). */
+  extraHandlers?: Partial<Record<string, CommandHandler>>;
+  /** Called when a command asks for a process restart (systemd restarts the service). */
+  requestExit?: (code: number) => void;
   simConfig?: SimConfig;
   /** Poll jitter per bus (ms); 0 in tests. */
   jitterMaxMs?: number;
+  heartbeatS?: number;
   forwarder?: { maxInflight?: number; retryBaseMs?: number; retryMaxMs?: number };
   mqtt?: { keepaliveS?: number; backoffBaseMs?: number; backoffMaxMs?: number; connectTimeoutMs?: number };
+  statusPage?: boolean;
 }
 
 /**
@@ -64,12 +81,21 @@ export class Agent {
   readonly statuses: MeterStatusTracker;
   readonly config: ConfigManager;
   readonly simulator: SimulatorDriver | undefined;
+  readonly led: Led;
   identity: Identity | undefined;
   link: (Link & { start(): void; stop(): Promise<void>; restart?(): void }) | undefined;
   forwarder: Forwarder | undefined;
+  health: HealthReporter | undefined;
+  commands: CommandDispatcher | undefined;
+  statusPage: StatusPageServer | undefined;
+  statusPort: number | undefined;
   private renewer: CertificateRenewer | undefined;
+  private readonly metrics: SystemMetrics;
   private readonly startedAt: number;
+  private provisioningState: StatusView['provisioning'] = 'waiting_for_code';
+  private provisioningDetail: string | undefined;
   private readonly uncleanStart: boolean;
+  private readonly lastRegister = new Map<string, string>();
   private stopped = false;
 
   constructor(private readonly d: AgentDeps) {
@@ -101,6 +127,8 @@ export class Agent {
       logger: d.logger,
     });
     this.tokens = new DeviceTokenCache(this.api, this.clock);
+    this.metrics = new SystemMetrics(d.host ?? realHost, env.stateDir);
+    this.led = d.led ?? (env.ledName ? new SysfsLed(env.ledName) : new SimLed());
     this.statuses = new MeterStatusTracker(3, (meterId, status, failures) =>
       this.emitEvent('meter_offline', 'warning', {
         meterId,
@@ -125,8 +153,16 @@ export class Agent {
           d.serialFactory ??
           ((bus) =>
             new LinuxTtyTransport({ device: bus.device!, baud: bus.baud ?? 9600, parity: bus.parity ?? 'none' })),
+        pulseSourceFactory: d.pulseSourceFactory ?? (() => new GpiomonPulseSource(env.gpioChip, d.logger)),
         jitterMaxMs: d.jitterMaxMs ?? 3000,
+        uncleanStart: () => this.uncleanStart,
         onResults: (r) => this.onResults(r),
+        onPulseOverflow: (meterId, hz) =>
+          this.emitEvent('pulse_overflow', 'warning', {
+            meterId,
+            message: `pulse rate ${hz.toFixed(1)} Hz above plausibility limit`,
+            data: { hz },
+          }),
       },
       {
         applied: (version, info) =>
@@ -141,6 +177,7 @@ export class Agent {
           }),
         activated: (rt: Runtime) => {
           this.statuses.reset(rt.config.meters.map((m) => m.meterId));
+          this.health?.setInterval(rt.config.heartbeatS);
         },
       },
       d.logger,
@@ -158,6 +195,17 @@ export class Agent {
   /** Boots the agent; resolves once the identity exists and the link is started. */
   async start(): Promise<void> {
     const env = this.d.env;
+    if (this.d.statusPage !== false) {
+      this.statusPage = new StatusPageServer({
+        host: env.statusHost,
+        port: env.statusPort,
+        view: () => this.statusView(),
+        submitCode: (c) => this.codes.submit(c),
+        provisioned: () => !!this.identity,
+        logger: this.d.logger,
+      });
+      this.statusPort = await this.statusPage.start();
+    }
     this.identity = await ensureIdentity({
       api: this.api,
       store: this.identityStore,
@@ -166,7 +214,12 @@ export class Agent {
       serial: env.serialNumber,
       logger: this.d.logger,
       onToken: (t) => this.tokens.seed(t),
+      onStatus: (s, detail) => {
+        this.provisioningState = s === 'done' ? 'provisioned' : s;
+        this.provisioningDetail = detail;
+      },
     });
+    this.provisioningState = 'provisioned';
     if (this.stopped) return;
     const id = this.identity;
 
@@ -203,8 +256,32 @@ export class Agent {
       tokens: this.tokens,
       ...this.d.forwarder,
     });
+    this.health = new HealthReporter(
+      {
+        gatewayId: id.gatewayId,
+        agentVersion: AGENT_VERSION,
+        configVersion: () => this.config.version(),
+        bufferedReadings: () => this.queue.metrics().depth,
+        meters: () => this.statuses.snapshot((this.config.current()?.meters ?? []).map((m) => m.meterId)),
+        uptimeS: () => (this.clock.now() - this.startedAt) / 1000,
+      },
+      this.metrics,
+      link,
+      this.clock,
+      this.d.logger,
+      this.d.heartbeatS ?? this.config.current()?.heartbeatS ?? 60,
+    );
+    this.commands = new CommandDispatcher({
+      db: this.db,
+      clock: this.clock,
+      timeZone: env.timeZone,
+      logger: this.d.logger,
+      sendAck: (ack: CommandAck) => this.pushOutbox('cmd/ack', ack),
+      handlers: { ...this.builtinHandlers(), ...this.d.extraHandlers },
+    });
     link.on('message', (suffix: string, payload: Buffer) => {
       if (suffix === 'config') void this.config.apply(payload);
+      else if (suffix === 'cmd') void this.commands?.handle(payload);
     });
     this.renewer = new CertificateRenewer({
       api: this.api,
@@ -217,6 +294,7 @@ export class Agent {
 
     await this.config.boot();
     this.forwarder.start();
+    this.health.start();
     link.start();
     this.renewer.start();
   }
@@ -226,9 +304,11 @@ export class Agent {
     if (this.stopped) return;
     this.stopped = true;
     this.renewer?.stop();
+    this.health?.stop();
     await this.config.stop();
     this.forwarder?.stop();
     await this.link?.stop();
+    await this.statusPage?.stop();
     this.kv.set('boot.clean', true);
     this.db.close();
   }
@@ -284,6 +364,7 @@ export class Agent {
         state: { rawMilli: p.rawMilli, rolloverOffsetMilli: p.rolloverOffsetMilli, registerMilli: p.registerMilli },
       });
       this.statuses.ok(r.meter.meterId, r.readAtMs, iso);
+      this.lastRegister.set(r.meter.meterId, register);
       if (p.decrease) {
         this.emitEvent('tamper', 'warning', {
           meterId: r.meter.meterId,
@@ -298,5 +379,85 @@ export class Agent {
     }
     this.queue.append(rows);
     this.forwarder?.kick();
+  }
+
+  private builtinHandlers(): Partial<Record<string, CommandHandler>> {
+    return {
+      read_now: async (args) => {
+        const rt = this.config.active();
+        if (!rt) throw new Error('no config applied');
+        const ids = Array.isArray(args.meterIds) ? args.meterIds.map(String) : undefined;
+        const res = await rt.scheduler.readNow(ids);
+        return {
+          read: res.filter((r) => r.ok).map((r) => r.meter.meterId),
+          failed: res.filter((r) => !r.ok).map((r) => ({ meterId: r.meter.meterId, status: r.ok ? 'ok' : r.status })),
+        };
+      },
+      restart: async () => {
+        setTimeout(() => {
+          void this.stop().finally(() => (this.d.requestExit ?? ((c) => process.exit(c)))(0));
+        }, 2000).unref();
+        return { restartInS: 2 };
+      },
+      identify: async (args) => {
+        const durationS = Math.min(Math.max(Number(args.durationS ?? 30) || 30, 1), 600);
+        void blinkIdentify(this.led, durationS);
+        return { durationS };
+      },
+      set_log_level: async (args) => {
+        const level = typeof args.level === 'string' ? args.level : '';
+        if (!['fatal', 'error', 'warn', 'info', 'debug', 'trace'].includes(level))
+          throw new Error(`bad level ${level}`);
+        const previous = this.d.logger.level;
+        this.d.logger.level = level;
+        const durationS = Number(args.durationS ?? 0);
+        if (durationS > 0)
+          this.clock.setTimeout(() => {
+            this.d.logger.level = previous;
+          }, durationS * 1000);
+        return { level, previous, ...(durationS > 0 ? { revertAfterS: durationS } : {}) };
+      },
+      upload_logs: async (args) => {
+        if (!this.d.logRing) throw new Error('log ring not available');
+        const hours = Math.min(Math.max(Number(args.sinceHours ?? 24) || 24, 1), 168);
+        return new LogUploader(this.api, this.tokens, this.d.logRing).upload(hours);
+      },
+    };
+  }
+
+  async statusView(): Promise<StatusView> {
+    const cfg = this.config.current();
+    const sys = await this.metrics.snapshot().catch(() => ({ link: 'ethernet', rssi: null }));
+    const q = this.queue.metrics();
+    return {
+      agentVersion: AGENT_VERSION,
+      gatewayId: this.identity?.gatewayId ?? null,
+      provisioning: this.identity ? 'provisioned' : this.provisioningState,
+      ...(this.provisioningDetail ? { provisioningDetail: this.provisioningDetail } : {}),
+      configVersion: this.config.version(),
+      link: {
+        broker: this.link?.connected ? 'connected' : 'disconnected',
+        type: sys.link,
+        rssi: sys.rssi,
+        httpsFallback: this.forwarder?.usingHttpsFallback ?? false,
+      },
+      queue: { depth: q.depth, oldestReadAt: q.oldestReadAt, evictedTotal: q.evictedTotal },
+      uptimeS: Math.floor((this.clock.now() - this.startedAt) / 1000),
+      now: isoWithOffset(this.clock.now(), this.d.env.timeZone),
+      meters: (cfg?.meters ?? []).map((m) => {
+        const s = this.statuses.get(m.meterId);
+        return {
+          meterId: m.meterId,
+          roomCode: m.roomCode,
+          driver: m.driver,
+          bus: m.bus,
+          address: m.address !== undefined ? String(m.address) : m.pin !== undefined ? `pin ${m.pin}` : '—',
+          status: s.status,
+          lastReadAt: s.lastReadAt,
+          lastRegister: this.lastRegister.get(m.meterId) ?? null,
+          unit: m.unit,
+        };
+      }),
+    };
   }
 }
