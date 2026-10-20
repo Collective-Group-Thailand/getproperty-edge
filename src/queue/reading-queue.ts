@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 
 import type { MeterUnit, Reading, ReadingQuality } from '../protocol/types.js';
@@ -76,6 +77,12 @@ interface Row {
  */
 export class ReadingQueue {
   readonly capacity: number;
+  /**
+   * Identity of this state database's sequence space (protocol 1.1 `TelemetryBatch.seqEpoch`, D-227): created once
+   * with the database and kept for its life. A wiped, re-flashed or replaced gateway starts a new one together with
+   * `seq` 1, so the cloud never mistakes the restarted sequence for duplicates.
+   */
+  readonly seqEpoch: string;
   private depth: number;
   /** Highest id handed out to the transport since the last rewind; rows above it are not in flight. */
   private cursor = 0;
@@ -97,6 +104,7 @@ export class ReadingQueue {
     private readonly opts: ReadingQueueOptions = {},
   ) {
     this.capacity = opts.capacity ?? 1_000_000;
+    this.seqEpoch = seqEpochOf(db);
     this.depth = (db.prepare('SELECT count(*) AS n FROM readings').get() as { n: number }).n;
     this.stmts = {
       getState: db.prepare('SELECT * FROM meter_state WHERE meter_id = ?'),
@@ -292,4 +300,17 @@ function toReading(r: Row): Reading {
   };
   if (r.extra) reading.extra = JSON.parse(r.extra) as Record<string, number>;
   return reading;
+}
+
+/** The persisted sequence epoch of the agent database, created on first use (same database as `meter_state`). */
+export function seqEpochOf(db: Db): string {
+  const row = db.prepare("SELECT value FROM kv WHERE key = 'seq_epoch'").get() as { value: string } | undefined;
+  if (row) return JSON.parse(row.value) as string;
+  const epoch = randomUUID();
+  db.prepare("INSERT INTO kv (key, value) VALUES ('seq_epoch', ?) ON CONFLICT(key) DO NOTHING").run(
+    JSON.stringify(epoch),
+  );
+  return JSON.parse(
+    (db.prepare("SELECT value FROM kv WHERE key = 'seq_epoch'").get() as { value: string }).value,
+  ) as string;
 }

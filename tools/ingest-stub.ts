@@ -3,7 +3,8 @@ import { assertValid, type PayloadName } from '../src/protocol/validate.js';
 
 /**
  * Reference ingest (mirrors getproperty-api's ingest rules, D-143): validates every envelope against the
- * contract, checks topic gateway = payload gateway = certificate CN, dedups on (meterId, seq) and keeps
+ * contract, checks topic gateway = payload gateway = certificate CN, dedups on (gatewayId, seqEpoch, meterId, seq) —
+ * protocol 1.1, D-227 — and keeps
  * enough per-meter state to prove "zero lost, zero duplicates accepted, in order".
  */
 export class IngestStub {
@@ -73,11 +74,13 @@ export class IngestStub {
   /** Same envelope over HTTPS fallback (`POST /v1/device/readings/batch`). */
   telemetry(batch: TelemetryBatch): void {
     this.batches++;
+    const stream = `${batch.gatewayId}/${batch.seqEpoch ?? '-'}`;
     for (const r of batch.readings) {
-      let s = this.seen.get(r.meterId);
+      const key = `${stream}|${r.meterId}`;
+      let s = this.seen.get(key);
       if (!s) {
         s = { bits: new Uint8Array(4096), max: 0 };
-        this.seen.set(r.meterId, s);
+        this.seen.set(key, s);
       }
       if (r.seq >= s.bits.length * 8) {
         const bigger = new Uint8Array(Math.max(s.bits.length * 2, Math.ceil((r.seq + 1) / 8) + 1024));
@@ -103,10 +106,10 @@ export class IngestStub {
   /** Seqs 1..max present for every meter (no gap) — returns the meters with gaps. */
   gaps(): string[] {
     const out: string[] = [];
-    for (const [meter, s] of this.seen) {
+    for (const [key, s] of this.seen) {
       for (let q = 1; q <= s.max; q++) {
         if (!(s.bits[q >> 3]! & (1 << (q & 7)))) {
-          out.push(meter);
+          out.push(key.slice(key.indexOf('|') + 1));
           break;
         }
       }
@@ -114,11 +117,14 @@ export class IngestStub {
     return out;
   }
 
+  /** Highest seq of a meter over every sequence space it was seen in. */
   maxSeq(meterId: string): number {
-    return this.seen.get(meterId)?.max ?? 0;
+    let max = 0;
+    for (const [key, s] of this.seen) if (key.endsWith(`|${meterId}`)) max = Math.max(max, s.max);
+    return max;
   }
 
   meters(): number {
-    return this.seen.size;
+    return new Set([...this.seen.keys()].map((k) => k.slice(k.indexOf('|') + 1))).size;
   }
 }

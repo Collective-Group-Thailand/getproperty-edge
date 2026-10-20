@@ -23,6 +23,8 @@ export function buildTelemetryBatch(
   configVersion: number,
   sentAt: string,
   readings: Reading[],
+  /** Protocol 1.1 (D-227): the sequence space of the readings' seqs (`ReadingQueue.seqEpoch`). */
+  seqEpoch?: string,
 ): TelemetryBatch {
   const seen = new Set<string>();
   for (const r of readings) {
@@ -30,7 +32,13 @@ export function buildTelemetryBatch(
     if (seen.has(k)) throw new Error(`duplicate (meterId, seq) in batch: ${k}`);
     seen.add(k);
   }
-  return assertValid('TelemetryBatch', { gatewayId, configVersion, sentAt, readings });
+  return assertValid('TelemetryBatch', {
+    gatewayId,
+    configVersion,
+    sentAt,
+    ...(seqEpoch ? { seqEpoch } : {}),
+    readings,
+  });
 }
 
 export function buildEvent(

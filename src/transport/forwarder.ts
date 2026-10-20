@@ -42,7 +42,7 @@ export interface ForwarderOptions {
 /**
  * Drains the on-disk outbox and reading queue to the broker. Readings are deleted only on PUBACK
  * (or HTTPS 2xx in fallback); anything unacknowledged when the link drops is re-sent in order after
- * reconnect — the cloud dedups on (meterId, seq). Every envelope is schema-validated before it leaves.
+ * reconnect — the cloud dedups on (gatewayId, seqEpoch, meterId, seq). Every envelope is schema-validated before it leaves.
  */
 export class Forwarder extends EventEmitter {
   private readonly clock: Clock;
@@ -148,6 +148,7 @@ export class Forwarder extends EventEmitter {
           batch.configVersion,
           isoWithOffset(this.clock.now(), this.o.timeZone),
           batch.readings,
+          this.o.queue.seqEpoch,
         ),
       );
       this.o.link.publish('telemetry', payload).then(
@@ -245,6 +246,7 @@ export class Forwarder extends EventEmitter {
         batch.configVersion,
         isoWithOffset(this.clock.now(), this.o.timeZone),
         batch.readings,
+        this.o.queue.seqEpoch,
       );
       try {
         const bearer = this.o.tokens ? await this.o.tokens.get() : undefined;

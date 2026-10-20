@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
+import { buildTelemetryBatch } from '../../src/protocol/envelopes.js';
 import { Outbox } from '../../src/queue/outbox.js';
 import { type NewReading, ReadingQueue, type SeqGap } from '../../src/queue/reading-queue.js';
 import { openDb } from '../../src/storage/db.js';
+import { IngestStub } from '../../tools/ingest-stub.js';
 
 const HOUR = 3_600_000;
 const T0 = Date.parse('2026-11-01T00:00:00+07:00');
@@ -131,5 +133,39 @@ describe('Outbox', () => {
     for (let i = 0; i < 5; i++) o.push('events', { i });
     expect(o.depth()).toBe(3);
     expect(o.take()[0]!.payload).toBe('{"i":2}');
+  });
+});
+
+describe('sequence epoch (protocol 1.1, D-227, review #4)', () => {
+  it('is created with the state database, kept across restarts, and new after the state is wiped', () => {
+    const db = openDb(':memory:');
+    const q = new ReadingQueue(db);
+    expect(q.seqEpoch).toMatch(/^[A-Za-z0-9-]{8,64}$/);
+    expect(new ReadingQueue(db).seqEpoch).toBe(q.seqEpoch);
+    expect(q.append([r('a', T0)])).toEqual([1]);
+    // a re-flashed / replaced gateway: a fresh database restarts seq at 1 under another epoch
+    const wiped = new ReadingQueue(openDb(':memory:'));
+    expect(wiped.append([r('a', T0 + HOUR)])).toEqual([1]);
+    expect(wiped.seqEpoch).not.toBe(q.seqEpoch);
+  });
+
+  it('travels on every telemetry batch, and the reference ingest accepts a restarted sequence', () => {
+    const gw = '0199f2a0-0000-7000-8000-0000000000aa';
+    const ingest = new IngestStub();
+    const send = (q: ReadingQueue) => {
+      const b = q.nextBatch(200)!;
+      const env = buildTelemetryBatch(gw, b.configVersion, '2026-11-01T00:15:03+07:00', b.readings, q.seqEpoch);
+      expect(env.seqEpoch).toBe(q.seqEpoch);
+      ingest.telemetry(env);
+      q.ack(b.ids);
+    };
+    const meter = '0199f2a0-0000-7000-8000-0000000000ab';
+    const old = new ReadingQueue(openDb(':memory:'));
+    old.append([r(meter, T0), r(meter, T0 + 1)]);
+    send(old);
+    const replaced = new ReadingQueue(openDb(':memory:'));
+    replaced.append([r(meter, T0 + HOUR), r(meter, T0 + HOUR + 1)]);
+    send(replaced);
+    expect({ accepted: ingest.accepted, duplicates: ingest.duplicates }).toEqual({ accepted: 4, duplicates: 0 });
   });
 });
