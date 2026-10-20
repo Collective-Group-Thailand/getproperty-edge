@@ -14,8 +14,11 @@ export interface AgentEnv {
   /** Cold start: fetch `GET /v1/device/config` when no config arrived on MQTT after this long; 0 = off. */
   configPullAfterS: number;
   queueCapacity: number;
+  /** Status page bind address — 127.0.0.1 by default (review #12); a LAN address needs the local admin token. */
   statusHost: string;
   statusPort: number;
+  /** Local admin token of the status page for LAN clients (≥ 16 chars); generated into the state dir when unset. */
+  statusToken?: string | undefined;
   logLevel: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
   gpioChip: string;
   ledName: string | undefined;
@@ -43,6 +46,12 @@ function boardSerial(): string | null {
     }
   }
   return null;
+}
+
+function statusToken(v: string | undefined): string | undefined {
+  if (v === undefined || v === '') return undefined;
+  if (!/^[\x21-\x7e]{16,128}$/.test(v)) throw new Error('GP_STATUS_TOKEN must be 16–128 printable characters');
+  return v;
 }
 
 /**
@@ -73,7 +82,8 @@ export function loadEnv(env: NodeJS.ProcessEnv = process.env): AgentEnv {
     httpsFallbackAfterS: int('GP_HTTPS_FALLBACK_AFTER_S', env.GP_HTTPS_FALLBACK_AFTER_S, 600, 0, 86_400),
     configPullAfterS: int('GP_CONFIG_PULL_AFTER_S', env.GP_CONFIG_PULL_AFTER_S, 120, 0, 86_400),
     queueCapacity: int('GP_QUEUE_CAPACITY', env.GP_QUEUE_CAPACITY, 1_000_000, 1000, 20_000_000),
-    statusHost: env.GP_STATUS_HOST ?? '0.0.0.0',
+    statusHost: env.GP_STATUS_HOST || '127.0.0.1',
+    statusToken: statusToken(env.GP_STATUS_TOKEN),
     statusPort: int('GP_STATUS_PORT', env.GP_STATUS_PORT, 8080, 0, 65_535),
     logLevel: level,
     gpioChip: env.GP_GPIO_CHIP ?? 'gpiochip0',

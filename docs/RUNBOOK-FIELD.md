@@ -32,7 +32,12 @@ max ~50 m. Note the channel number (GPIO pin) and the meter's **litres per pulse
 
 ## 5. Provision the gateway
 
-1. Find the gateway's address (router DHCP list, or the label QR) and open `http://<gateway-ip>:8080`.
+1. The status page listens on the gateway itself only (`127.0.0.1:8080`, release review #12). Either set the
+   provisioning code in `/etc/getproperty-edge/agent.env` (`GP_PROVISIONING_CODE=…`) and restart the service, or,
+   for the install visit, set `GP_STATUS_HOST=0.0.0.0`, restart, read the local admin token with
+   `sudo cat /var/lib/getproperty-edge/status-token`, find the gateway's address (router DHCP list, or the label QR)
+   and open `http://<gateway-ip>:8080` — the browser asks for a password: any user name, the token as password.
+   Remove `GP_STATUS_HOST` again when you leave (the page shows each room's meter readings).
 2. Type the **one-time provisioning code** printed on the gateway QR label → _Register_.
    The page shows the gateway id when it is registered. (A rejected code: ask the office for a new one.)
 3. In the staff PWA: scan the gateway QR, then for every meter scan its QR (or enter the serial), choose

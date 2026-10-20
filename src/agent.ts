@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { LookupFunction } from 'node:net';
 import { join } from 'node:path';
 
@@ -32,7 +33,7 @@ import { alwaysSynced, type ClockSync } from './scheduler/clock-sync.js';
 import { processRegister } from './scheduler/register-math.js';
 import type { ReadResult } from './scheduler/scheduler.js';
 import type { StatusView } from './status-page/render.js';
-import { StatusPageServer } from './status-page/server.js';
+import { bindsBeyondLoopback, StatusPageServer } from './status-page/server.js';
 import { type Db, KvStore, openDb } from './storage/db.js';
 import { Forwarder } from './transport/forwarder.js';
 import { DeviceApi } from './transport/https/device-api.js';
@@ -207,6 +208,28 @@ export class Agent {
     return this.uncleanStart;
   }
 
+  /**
+   * The status page's local admin token (review #12): GP_STATUS_TOKEN, else — when the page listens beyond this host —
+   * a random token kept in `<stateDir>/status-token` (0600, readable on the gateway only; the path is logged, never the
+   * token). Loopback-only pages need none.
+   */
+  private statusToken(env: AgentEnv): string | undefined {
+    if (env.statusToken) return env.statusToken;
+    if (!bindsBeyondLoopback(env.statusHost)) return undefined;
+    const file = join(env.stateDir, 'status-token');
+    try {
+      const existing = readFileSync(file, 'utf8').trim();
+      if (existing.length >= 16) return existing;
+    } catch {
+      /* first start */
+    }
+    const token = randomBytes(24).toString('base64url');
+    mkdirSync(env.stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(file, `${token}\n`, { mode: 0o600 });
+    this.d.logger.warn({ file }, 'status page listens on the LAN: local admin token written (show it with sudo cat)');
+    return token;
+  }
+
   /** Boots the agent; resolves once the identity exists and the link is started. */
   async start(): Promise<void> {
     const env = this.d.env;
@@ -214,6 +237,7 @@ export class Agent {
       this.statusPage = new StatusPageServer({
         host: env.statusHost,
         port: env.statusPort,
+        token: this.statusToken(env),
         view: () => this.statusView(),
         submitCode: (c) => this.codes.submit(c),
         provisioned: () => !!this.identity,

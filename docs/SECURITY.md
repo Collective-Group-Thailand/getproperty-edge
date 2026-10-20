@@ -20,10 +20,15 @@ verification on the pilot hardware; `[ ]` = open. Test references in parentheses
 - [x] Inbound: only the LAN status page (`:8080`). Read-only (GET/HEAD), no JavaScript, CSP
       `default-src 'none'` + style hash, `X-Frame-Options: DENY`, `nosniff`, `no-store`, per-client rate
       limit, 1 KiB request bodies (`status-page.test.ts`).
-- [x] The page exposes nothing sensitive: no keys, certificates, tokens or provisioning codes
-      (`test/e2e/status-page.spec.ts` asserts it on the HTML and `/status.json`). It shows meter ids,
-      room codes and registers — accepted as non-sensitive on the building LAN (no auth by design, CLAUDE.md).
-- [x] The one write (`POST /provision`) exists only while the gateway is unprovisioned; afterwards 404.
+- [x] The page exposes no keys, certificates, tokens or provisioning codes (`test/e2e/status-page.spec.ts`
+      asserts it on the HTML and `/status.json`). Its per-room registers and last-read times **are** personal
+      data (they reveal whether a room is occupied — release review #12, PDPA): the page binds to `127.0.0.1` by
+      default (`GP_STATUS_HOST`), and a LAN binding requires the **local admin token** for every request except
+      `/healthz` (HTTP Basic with the token as password, or `Authorization: Bearer`; constant-time compare) —
+      `GP_STATUS_TOKEN`, else a random token generated into `<stateDir>/status-token` (0600). Loopback clients (an SSH
+      session on the gateway) need none (`status-page.test.ts`).
+- [x] The one write (`POST /provision`) exists only while the gateway is unprovisioned (afterwards 404) and, from
+      the LAN, needs the local admin token like every other request (no CSRF from another host on the network).
 - [~] Restrict `:8080` to the LAN with the gateway firewall (template in `docs/RUNBOOK-FIELD.md`).
 - [x] RS485 and GPIO are never exposed over the network; the agent opens no other listening socket.
 - [x] Outbound MQTT: MQTT 5 over TLS ≥ 1.2 with the client certificate, broker certificate verified

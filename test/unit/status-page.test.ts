@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import { loadEnv } from '../../src/env.js';
 import { esc, renderStatusPage, type StatusView } from '../../src/status-page/render.js';
-import { StatusPageServer } from '../../src/status-page/server.js';
+import { bindsBeyondLoopback, isLoopback, StatusPageServer } from '../../src/status-page/server.js';
 import { silentLogger } from '../../src/util/logger.js';
 
 const view = (over: Partial<StatusView> = {}): StatusView => ({
@@ -47,11 +48,17 @@ describe('status page rendering', () => {
   });
 });
 
-async function withServer(provisioned: boolean, fn: (base: string, codes: string[]) => Promise<void>, rate = 60) {
+async function withServer(
+  provisioned: boolean,
+  fn: (base: string, codes: string[]) => Promise<void>,
+  rate = 60,
+  access: { token?: string; trustLoopback?: boolean } = {},
+) {
   const codes: string[] = [];
   const srv = new StatusPageServer({
     host: '127.0.0.1',
     port: 0,
+    ...access,
     view: async () => view(provisioned ? {} : { gatewayId: null, provisioning: 'waiting_for_code' }),
     submitCode: (c) => {
       codes.push(c);
@@ -113,6 +120,77 @@ describe('status page server', () => {
         expect(statuses).toContain(429);
       },
       5,
+    );
+  });
+});
+
+describe('status page access (review #12)', () => {
+  const TOKEN = 'local-admin-token-0123456789';
+  const lan = { token: TOKEN, trustLoopback: false }; // emulates a client on the building network
+
+  it('binds to loopback by default and needs a token beyond it', () => {
+    expect(loadEnv({}).statusHost).toBe('127.0.0.1');
+    expect(bindsBeyondLoopback('127.0.0.1')).toBe(false);
+    expect(bindsBeyondLoopback('localhost')).toBe(false);
+    expect(bindsBeyondLoopback('0.0.0.0')).toBe(true);
+    expect(bindsBeyondLoopback('192.168.1.20')).toBe(true);
+    expect(isLoopback('::ffff:127.0.0.1')).toBe(true);
+    expect(() => loadEnv({ GP_STATUS_TOKEN: 'short' })).toThrow(/GP_STATUS_TOKEN/);
+  });
+
+  it('a LAN client without the token sees no per-unit data and cannot provision', async () => {
+    await withServer(
+      false,
+      async (base, codes) => {
+        for (const path of ['/', '/status.json']) {
+          const res = await fetch(`${base}${path}`);
+          expect(res.status).toBe(401);
+          expect(res.headers.get('www-authenticate')).toMatch(/^Basic realm=/);
+          expect(await res.text()).not.toMatch(/roomCode|12345\.678|<script/);
+        }
+        const wrong = await fetch(`${base}/status.json`, { headers: { authorization: 'Bearer nope-nope-nope-nope' } });
+        expect(wrong.status).toBe(401);
+        const post = await fetch(`${base}/provision`, {
+          method: 'POST',
+          body: 'code=GP7K-Q2MX-9TZ4',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          redirect: 'manual',
+        });
+        expect(post.status).toBe(401);
+        expect(codes).toEqual([]);
+        expect((await fetch(`${base}/healthz`)).status).toBe(200);
+      },
+      60,
+      lan,
+    );
+  });
+
+  it('with the token (Basic password or Bearer) the LAN client gets the page', async () => {
+    await withServer(
+      true,
+      async (base) => {
+        const basic = `Basic ${Buffer.from(`installer:${TOKEN}`).toString('base64')}`;
+        const page = await fetch(`${base}/`, { headers: { authorization: basic } });
+        expect(page.status).toBe(200);
+        const json = (await (
+          await fetch(`${base}/status.json`, { headers: { authorization: `Bearer ${TOKEN}` } })
+        ).json()) as StatusView;
+        expect(json.meters).toHaveLength(1);
+      },
+      60,
+      lan,
+    );
+  });
+
+  it('a LAN-facing page without any token configured serves nobody but /healthz', async () => {
+    await withServer(
+      true,
+      async (base) => {
+        expect((await fetch(`${base}/`)).status).toBe(401);
+        expect((await fetch(`${base}/healthz`)).status).toBe(200);
+      },
+      60,
+      { trustLoopback: false },
     );
   });
 });
