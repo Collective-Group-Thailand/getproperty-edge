@@ -15,7 +15,7 @@ The gateway agent that runs inside each building on a Linux ARM64 gateway (D-132
 - **Persist before publish**: every reading is appended to the on-disk queue before any network attempt; delete only on PUBACK; 30-day buffer with the eviction rule in the protocol §4.
 - Config comes only from the cloud (retained `/config`), applied atomically with rollback; no local edits of bindings except through the LAN status page's read-only view.
 - Drivers are isolated behind `MeterDriver` (`read(address) → { register, unit, extra }`) with a simulator driver for tests; a new meter model is a driver, never a protocol change (D-013).
-- No secrets on disk except the device certificate/key (0600, owned by the service user); no inbound network services except the LAN status page (read-only, no auth needed because it exposes nothing sensitive — verify in review).
+- No secrets on disk except the device certificate/key (0600, owned by the service user); no inbound network services except the status page, which binds to localhost by default and requires the local admin token when exposed on the LAN (D-227 review fix #12; see SECURITY.md).
 - Single binary (Node 24 SEA or pkg) + systemd unit + A/B update slots; must run on 512 MB RAM; CPU budget < 10 % average on a Cortex-A53 at 300 meters / 15-min polling.
 - Plan Mode first for each deliverable; small slices; Conventional Commits; CI green. Ambiguity → `docs/PROGRESS.md` + the conservative option.
 
