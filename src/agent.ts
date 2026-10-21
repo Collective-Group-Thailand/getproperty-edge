@@ -36,7 +36,7 @@ import type { StatusView } from './status-page/render.js';
 import { bindsBeyondLoopback, StatusPageServer } from './status-page/server.js';
 import { type Db, KvStore, openDb } from './storage/db.js';
 import { Forwarder } from './transport/forwarder.js';
-import { DeviceApi } from './transport/https/device-api.js';
+import { DeviceApi, deviceRoute } from './transport/https/device-api.js';
 import type { Link } from './transport/link.js';
 import { MqttLink } from './transport/mqtt/mqtt-link.js';
 import { type Clock, systemClock } from './util/clock.js';
@@ -269,12 +269,18 @@ export class Agent {
     if (this.uncleanStart)
       this.emitEvent('power_loss', 'warning', { message: 'previous run ended without a clean shutdown' });
 
+    if (id.mqttWsUrl && !env.mqttWsFallback)
+      this.d.logger.info(
+        { httpsFallbackAfterS: env.httpsFallbackAfterS },
+        'mqtt: 8883 only — WSS fallback disabled (O-012, GP_MQTT_WS_FALLBACK); the HTTPS readings fallback covers outages',
+      );
     const link =
       this.d.linkFactory?.(id) ??
       new MqttLink({
         gatewayId: id.gatewayId,
         url: env.mqttUrlOverride ?? id.mqttUrl,
-        ...(id.mqttWsUrl ? { wsUrl: id.mqttWsUrl } : {}),
+        // O-012: no WSS fallback unless explicitly enabled (and then still device-CA + client certificate only)
+        ...(id.mqttWsUrl && env.mqttWsFallback ? { wsUrl: id.mqttWsUrl } : {}),
         credentials: () => this.identityStore.credentials()!,
         logger: this.d.logger,
         clock: systemClock,
@@ -324,16 +330,19 @@ export class Agent {
       currentVersion: this.d.ota?.currentVersion ?? AGENT_VERSION,
       arch: this.d.ota?.arch ?? process.arch,
       fetchManifest: async (url) => {
-        // `manifestUrl` is `<api>/v1/device/ota/manifest?releaseId=…` (protocol §6); a relative URL is
-        // resolved against the API origin.
-        const abs = new URL(url, env.apiBaseUrl);
-        const same = abs.origin === new URL(env.apiBaseUrl).origin;
-        return this.api.json('GET', abs.href, undefined, {
-          mtls: same,
-          ...(same ? { bearer: await this.tokens.get() } : {}),
+        // `manifestUrl` is `<api>/v1/device/ota/manifest?releaseId=…` (protocol §6), relative → the device host. The
+        // api builds it from PUBLIC_API_BASE_URL (the public API host, which strips client certificates on the
+        // platform, D-230), so a device path is always fetched from the device host (CR-012).
+        const route = deviceRoute(url, env.apiBaseUrl);
+        return this.api.json('GET', route.url.href, undefined, {
+          mtls: route.credentials,
+          ...(route.credentials ? { bearer: await this.tokens.get() } : {}),
         });
       },
-      download: async (url) => this.api.stream(new URL(url), new URL(url).origin === new URL(env.apiBaseUrl).origin),
+      download: async (url) => {
+        const route = deviceRoute(url, env.apiBaseUrl);
+        return this.api.stream(route.url, route.credentials);
+      },
       clock: this.clock,
       logger: this.d.logger,
       event: (type, severity, message, data) => this.emitEvent(type, severity, { message, data }),

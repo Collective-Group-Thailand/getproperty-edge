@@ -80,8 +80,10 @@ describe('E1.4 — OTA through the broker, cold start budget', () => {
     const cmd = JSON.stringify({
       cmdId,
       type: 'ota_apply',
-      // protocol §6: `<api>/v1/device/ota/manifest?releaseId=…`; a relative URL resolves against the API
-      args: { manifestUrl: `/v1/device/ota/manifest?releaseId=${releaseId}` },
+      // protocol §6: `<api>/v1/device/ota/manifest?releaseId=…` — the api builds it on PUBLIC_API_BASE_URL (the public
+      // API host, which strips client certificates on the platform, D-230); the agent fetches device paths from its
+      // device host (GP_API_URL) with mTLS + bearer (CR-012)
+      args: { manifestUrl: `https://api.getproperty.test/v1/device/ota/manifest?releaseId=${releaseId}` },
       issuedAt: new Date().toISOString(),
     });
     for (let i = 0; i < 10 && !tb.ingest.acks.some((a) => a.cmdId === cmdId); i++) {

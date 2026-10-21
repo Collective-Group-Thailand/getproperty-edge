@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import type { LookupFunction } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,8 +9,30 @@ import type { GatewayConfig, MeterConfig } from '../src/protocol/types.js';
 import { silentLogger } from '../src/util/logger.js';
 import { ApiStub } from './api-stub.js';
 import { IngestStub } from './ingest-stub.js';
-import { createTestCa, issueClientCert, issueServerCert, type TestCa } from './pki.js';
+import { createTestCa, issueBrokerCert, issueClientCert, issueServerCert, type TestCa } from './pki.js';
 import { TestBroker } from './test-broker.js';
+
+export interface TestbedOptions {
+  keepReadings?: boolean;
+  /**
+   * Platform shape (D-230): the broker presents a certificate issued like `pnpm device:broker-cert --host <host>`
+   * and the bootstrap hands out `mqtts://<host>:<port>` (resolved to 127.0.0.1 by `lookup`); the API stub stays the
+   * device host. Unset = `mqtts://127.0.0.1:<port>` with a localhost/127.0.0.1 certificate.
+   */
+  mqttHost?: string;
+  /** `mqtt.wsUrl` in the bootstrap answer (the real api always sends one). */
+  mqttWsUrl?: string;
+  denyAction?: 'puback' | 'disconnect';
+}
+
+/** Resolves every name to 127.0.0.1 (the platform host names of `TestbedOptions.mqttHost`). */
+export const loopbackLookup: LookupFunction = (_host, options, cb) => {
+  if ((options as { all?: boolean }).all)
+    (cb as (e: null, a: Array<{ address: string; family: number }>) => void)(null, [
+      { address: '127.0.0.1', family: 4 },
+    ]);
+  else (cb as (e: null, a: string, f: number) => void)(null, '127.0.0.1', 4);
+};
 
 /** Broker + API stub + ingest on a throwaway CA: the cloud side for integration tests and dev:local. */
 export class Testbed {
@@ -19,21 +42,31 @@ export class Testbed {
   ingest: IngestStub;
   readonly dirs: string[] = [];
 
-  constructor(opts: { keepReadings?: boolean } = {}) {
+  constructor(private readonly opts: TestbedOptions = {}) {
     this.ingest = new IngestStub(opts);
   }
 
   async start(): Promise<this> {
     this.ca = await createTestCa();
     const server = await issueServerCert(this.ca);
+    const broker = this.opts.mqttHost
+      ? await issueBrokerCert(this.ca, this.opts.mqttHost).then((b) => ({ keyPem: b.keyPem, certPem: b.chainPem }))
+      : server;
     this.broker = new TestBroker({
-      key: server.keyPem,
-      cert: server.certPem,
+      key: broker.keyPem,
+      cert: broker.certPem,
       ca: this.ca.certPem,
+      ...(this.opts.denyAction ? { denyAction: this.opts.denyAction } : {}),
       onPublish: (cn, topic, payload) => this.ingest.handle(cn, topic, payload),
     });
     const port = await this.broker.start();
-    this.api = new ApiStub({ ca: this.ca, server, mqttUrl: `mqtts://127.0.0.1:${port}`, ingest: this.ingest });
+    this.api = new ApiStub({
+      ca: this.ca,
+      server,
+      mqttUrl: `mqtts://${this.opts.mqttHost ?? '127.0.0.1'}:${port}`,
+      ...(this.opts.mqttWsUrl ? { mqttWsUrl: this.opts.mqttWsUrl } : {}),
+      ingest: this.ingest,
+    });
     await this.api.start();
     return this;
   }
@@ -63,6 +96,7 @@ export class Testbed {
       simConfig: undefined,
       mqttUrlOverride: undefined,
       mqttServername: undefined,
+      mqttWsFallback: false,
       httpsFallbackAfterS: 0,
       configPullAfterS: 0,
       queueCapacity: 1_000_000,
@@ -89,7 +123,12 @@ export class Testbed {
       logger: silentLogger(),
       jitterMaxMs: 0,
       statusPage: false,
-      mqtt: { backoffBaseMs: 50, backoffMaxMs: 300, connectTimeoutMs: 3000 },
+      mqtt: {
+        backoffBaseMs: 50,
+        backoffMaxMs: 300,
+        connectTimeoutMs: 3000,
+        ...(this.opts.mqttHost ? { lookup: loopbackLookup } : {}),
+      },
       forwarder: { retryBaseMs: 50, retryMaxMs: 300 },
       ...rest,
       env: this.env({ provisioningCode: code, ...envOver }),

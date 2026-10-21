@@ -1,6 +1,7 @@
 import type { IncomingMessage } from 'node:http';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest, type RequestOptions } from 'node:https';
+import { rootCertificates } from 'node:tls';
 
 import type { Logger } from '../../util/logger.js';
 import type { MqttCredentials } from '../mqtt/mqtt-link.js';
@@ -43,9 +44,29 @@ export function assertSecureUrl(url: URL): void {
   throw new Error(`refusing non-HTTPS URL ${url.origin}`);
 }
 
+/**
+ * Where a cloud-supplied URL (OTA `manifestUrl`, artefact URL) is fetched, and whether the device credentials go
+ * with it. The `/v1/device/*` surface is served only on the device host (`GP_API_URL`, Caddy's `DEVICE_HOST` with the
+ * client-certificate check, D-230) — the public API host strips the certificate header — so a device path on any
+ * origin is fetched from the configured device host with mTLS + bearer. Credentials never go to another origin
+ * (a CDN / presigned S3 URL is fetched anonymously; OTA artefacts are verified by signature + sha256 anyway).
+ */
+export function deviceRoute(raw: string, apiBaseUrl: string): { url: URL; credentials: boolean } {
+  const base = new URL(apiBaseUrl);
+  const abs = new URL(raw, base);
+  if (abs.pathname.startsWith('/v1/device/'))
+    return { url: new URL(abs.pathname + abs.search, base), credentials: true };
+  return { url: abs, credentials: abs.origin === base.origin };
+}
+
 /** HTTPS client for the `/v1/device/*` surface (api-conventions §7). */
 export class DeviceApi {
-  constructor(private readonly opts: DeviceApiOptions) {}
+  /** System roots plus the optional extra CA (Node's `ca` option replaces the defaults, so they are merged here). */
+  private readonly ca: string[] | undefined;
+
+  constructor(private readonly opts: DeviceApiOptions) {
+    this.ca = opts.ca ? [...rootCertificates, opts.ca] : undefined;
+  }
 
   get baseUrl(): string {
     return this.opts.baseUrl;
@@ -76,7 +97,7 @@ export class DeviceApi {
     const creds = mtls ? this.opts.credentials?.() : undefined;
     const options: RequestOptions = { method: 'GET', headers, timeout: this.opts.timeoutMs ?? 30_000 };
     if (url.protocol === 'https:') {
-      if (this.opts.ca) options.ca = this.opts.ca;
+      if (this.ca) options.ca = this.ca;
       if (creds) {
         options.key = creds.key;
         options.cert = creds.cert;
@@ -113,7 +134,7 @@ export class DeviceApi {
       timeout: this.opts.timeoutMs ?? 30_000,
     };
     if (url.protocol === 'https:') {
-      if (this.opts.ca) options.ca = this.opts.ca;
+      if (this.ca) options.ca = this.ca;
       if (creds) {
         options.key = creds.key;
         options.cert = creds.cert;

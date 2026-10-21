@@ -18,6 +18,8 @@ export interface ApiStubOptions {
   ca: TestCa;
   server: { certPem: string; keyPem: string };
   mqttUrl: string;
+  /** `mqtt.wsUrl` of the bootstrap answer — the real api always sends one (MQTT_PUBLIC_WS_URL). */
+  mqttWsUrl?: string;
   ingest?: IngestStub;
   /** Validity of issued device certificates. */
   certDays?: number;
@@ -104,7 +106,7 @@ export class ApiStub {
           gatewayId: gw,
           certificatePem,
           caChainPem: this.o.ca.certPem,
-          mqtt: { url: this.o.mqttUrl },
+          mqtt: { url: this.o.mqttUrl, ...(this.o.mqttWsUrl ? { wsUrl: this.o.mqttWsUrl } : {}) },
           deviceToken: {
             accessToken: `tok-${++this.tokenSeq}`,
             expiresAt: new Date(Date.now() + 900_000).toISOString(),

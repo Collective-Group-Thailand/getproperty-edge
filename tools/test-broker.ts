@@ -14,6 +14,11 @@ export interface TestBrokerOptions {
   cert: string;
   ca: string;
   port?: number;
+  /**
+   * What a denied PUBLISH gets: `puback` = PUBACK 0x87 (default), `disconnect` = the connection is closed like the
+   * platform EMQX (`authorization.deny_action = disconnect`, D-230).
+   */
+  denyAction?: 'puback' | 'disconnect';
   /** Called for every authorised PUBLISH before PUBACK; returning a number ≥ 0x80 rejects it. */
   onPublish?: (cn: string, topic: string, payload: Buffer) => number | void;
 }
@@ -22,6 +27,7 @@ interface Conn {
   socket: TLSSocket;
   cn: string;
   clientId: string;
+  username: string | undefined;
   subs: Set<string>;
   will: IConnectPacket['will'] | undefined;
   nextId: number;
@@ -106,6 +112,11 @@ export class TestBroker extends EventEmitter {
     return [...this.conns].map((c) => c.cn);
   }
 
+  /** CONNECT identities as sent by the clients (EMQX on the platform takes the username and client id from the CN). */
+  sessions(): Array<{ cn: string; clientId: string; username: string | undefined }> {
+    return [...this.conns].map((c) => ({ cn: c.cn, clientId: c.clientId, username: c.username }));
+  }
+
   /** Publishes from the cloud side (config, commands). */
   publish(topic: string, payload: string | Buffer, opts: { retain?: boolean; qos?: 0 | 1 } = {}): void {
     const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
@@ -147,7 +158,16 @@ export class TestBroker extends EventEmitter {
           return socket.destroy();
         }
         for (const other of this.conns) if (other.clientId === cp.clientId) other.socket.destroy();
-        conn = { socket, cn, clientId: cp.clientId, subs: new Set(), will: cp.will, nextId: 0, cleanClose: false };
+        conn = {
+          socket,
+          cn,
+          clientId: cp.clientId,
+          username: cp.username,
+          subs: new Set(),
+          will: cp.will,
+          nextId: 0,
+          cleanClose: false,
+        };
         this.conns.add(conn);
         this.stats.connects++;
         this.send(conn, { cmd: 'connack', reasonCode: 0, sessionPresent: false });
@@ -179,6 +199,11 @@ export class TestBroker extends EventEmitter {
         const payload = Buffer.isBuffer(packet.payload) ? packet.payload : Buffer.from(packet.payload);
         if (!aclAllows(c.cn, 'publish', packet.topic)) {
           this.stats.denied++;
+          if (this.o.denyAction === 'disconnect') {
+            this.send(c, { cmd: 'disconnect', reasonCode: 0x87 });
+            c.socket.destroy();
+            return;
+          }
           if (packet.qos > 0) this.send(c, { cmd: 'puback', messageId: packet.messageId!, reasonCode: 0x87 });
           return;
         }

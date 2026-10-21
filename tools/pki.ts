@@ -93,6 +93,25 @@ export async function issueServerCert(
   return { certPem, keyPem: await keyPem(k) };
 }
 
+/**
+ * The EMQX device-listener certificate exactly as getproperty-api's `pnpm device:broker-cert --host <MQTT_HOST>`
+ * issues it from the device CA (D-230, deployment §5): CN = host, SAN dNSName = host only, serverAuth,
+ * digitalSignature, not a CA; `chainPem` = leaf + CA like its `server.pem`.
+ */
+export async function issueBrokerCert(
+  ca: TestCa,
+  host: string,
+): Promise<{ certPem: string; keyPem: string; chainPem: string }> {
+  const k = await keys();
+  const certPem = await issue(ca, host, k.publicKey, [
+    new x509.BasicConstraintsExtension(false, undefined, true),
+    new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature, true),
+    new x509.ExtendedKeyUsageExtension([x509.ExtendedKeyUsage.serverAuth], false),
+    new x509.SubjectAlternativeNameExtension([{ type: 'dns', value: host }]),
+  ]);
+  return { certPem, keyPem: await keyPem(k), chainPem: certPem + ca.certPem };
+}
+
 export async function issueClientCert(ca: TestCa, cn: string): Promise<{ certPem: string; keyPem: string }> {
   const k = await keys();
   const certPem = await issue(ca, cn, k.publicKey, [

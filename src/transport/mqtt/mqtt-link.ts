@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { LookupFunction } from 'node:net';
+import { isIP } from 'node:net';
 
 import mqtt, { type IClientOptions, type MqttClient } from 'mqtt';
 
@@ -16,11 +17,34 @@ export interface MqttCredentials {
   ca: string;
 }
 
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+/**
+ * Broker URLs must be TLS (`mqtts://`, `wss://`): the gateway authenticates with its client certificate and verifies
+ * the broker against the bootstrap CA only. Plain `mqtt://` / `ws://` is accepted for a loopback dev broker alone —
+ * never a silent downgrade to an unauthenticated path (D-230, O-012).
+ */
+export function assertSecureBrokerUrl(raw: string): void {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error('broker URL is not a URL');
+  }
+  if (u.protocol === 'mqtts:' || u.protocol === 'wss:') return;
+  if ((u.protocol === 'mqtt:' || u.protocol === 'ws:') && LOOPBACK.has(u.hostname)) return;
+  throw new Error(`refusing non-TLS broker URL ${u.protocol}//${u.host}`);
+}
+
 export interface MqttLinkOptions {
   gatewayId: string;
-  /** Primary broker URL, e.g. `mqtts://broker.getproperty.co:8883` */
+  /** Primary broker URL: EMQX's mutual-TLS listener, e.g. `mqtts://mqtt.getproperty.co:8883` (D-230). */
   url: string;
-  /** WebSocket fallback for buildings that block 8883, e.g. `wss://broker.getproperty.co/mqtt` (protocol §1) */
+  /**
+   * WebSocket fallback for buildings that block 8883 (protocol §1). **Not available on the R1 platform** (O-012):
+   * the agent passes it only when `GP_MQTT_WS_FALLBACK=on`, and the WSS endpoint is held to the same rules as 8883
+   * (server certificate from the bootstrap CA, client certificate presented) — it fails closed otherwise.
+   */
   wsUrl?: string;
   credentials: () => MqttCredentials;
   keepaliveS?: number;
@@ -58,6 +82,8 @@ export class MqttLink extends EventEmitter implements Link {
     super();
     this.clock = opts.clock ?? systemClock;
     this.backoff = new Backoff(opts.backoffBaseMs ?? 1000, opts.backoffMaxMs ?? 120_000, opts.random);
+    assertSecureBrokerUrl(opts.url);
+    if (opts.wsUrl) assertSecureBrokerUrl(opts.wsUrl);
   }
 
   get connected(): boolean {
@@ -121,14 +147,27 @@ export class MqttLink extends EventEmitter implements Link {
       queueQoSZero: false,
       key: creds.key,
       cert: creds.cert,
+      // the bootstrap CA chain is the only trust anchor (no system roots); hostname checked against the SAN
       ca: creds.ca,
       rejectUnauthorized: true,
       will: { topic: topic(gw, 'health'), payload: Buffer.from(lwtPayload()), qos: 1, retain: false },
     };
     if (this.opts.servername) options.servername = this.opts.servername;
+    (options as IClientOptions & { minVersion?: string }).minVersion = 'TLSv1.2';
     if (this.opts.lookup) (options as IClientOptions & { lookup?: LookupFunction }).lookup = this.opts.lookup;
     const url = this.currentUrl;
-    if (url.startsWith('wss:')) options.wsOptions = { key: creds.key, cert: creds.cert, ca: creds.ca };
+    if (url.startsWith('wss:')) {
+      const host = new URL(url).hostname;
+      options.wsOptions = {
+        key: creds.key,
+        cert: creds.cert,
+        ca: creds.ca,
+        rejectUnauthorized: true,
+        minVersion: 'TLSv1.2',
+        ...(this.opts.servername ? { servername: this.opts.servername } : isIP(host) === 0 ? { servername: host } : {}),
+        ...(this.opts.lookup ? { lookup: this.opts.lookup } : {}),
+      };
+    }
     const c = mqtt.connect(url, options);
     this.client = c;
 

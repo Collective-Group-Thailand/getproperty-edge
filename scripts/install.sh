@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # getproperty-edge installer — run as root on the gateway (Debian/Raspberry Pi OS, arm64).
 #
-#   sudo ./install.sh --binary ./getproperty-edge-0.1.0-linux-arm64 --api-url https://api.getproperty.co
+#   sudo ./install.sh --binary ./getproperty-edge-0.1.0-linux-arm64 [--api-url https://device.getproperty.co]
 #
 # Creates the service user, directories and permissions, installs the binary into A/B slot "a",
 # the OTA guard, the systemd unit, udev rules (RS485 adapters, GPIO, LEDs), NTP and the hardware
@@ -13,7 +13,8 @@ set -euo pipefail
 
 ROOT=""
 BINARY=""
-API_URL="https://api.getproperty.co"
+# the device host on Collective's platform (Caddy DEVICE_HOST with the gateway client-certificate check, D-230)
+API_URL="https://device.getproperty.co"
 TZ_NAME="Asia/Bangkok"
 NO_SYSTEMD=0
 SVC_USER="gpedge"
@@ -82,7 +83,10 @@ echo "==> configuration (no secrets)"
 umask 027
 cat > "$ETC/agent.env" << CONF
 # getproperty-edge — non-secret settings; meters and buses come from the cloud config
+# device host (bootstrap, token, renewal, readings fallback); the broker URL comes with the bootstrap answer
 GP_API_URL=$API_URL
+# MQTT 5 + mTLS on outbound TCP 8883 only — WSS on 443 is not available yet (O-012); keep off
+GP_MQTT_WS_FALLBACK=off
 GP_TZ=$TZ_NAME
 GP_DRIVER_MODE=hardware
 GP_STATUS_PORT=8080
