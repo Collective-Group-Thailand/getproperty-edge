@@ -53,27 +53,51 @@ max ~50 m. Note the channel number (GPIO pin) and the meter's **litres per pulse
 
 ## Troubleshooting
 
-| Status page shows               | Likely cause                                              | Fix                                                                                                                                                         |
-| ------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| meter `not_found`               | wrong Modbus ID or meter model, meter unpowered           | check the ID on the meter vs the PWA binding                                                                                                                |
-| meter `timeout` (was ok before) | A/B swapped, cable cut, missing termination on a long run | swap A/B, check continuity, fit 120 Ω                                                                                                                       |
-| meter `crc_error`               | noise, wrong baud/parity, two meters with the same ID     | check baud 9600 8N2, unique IDs, shield at one end                                                                                                          |
-| Broker `disconnected`           | building firewall blocks 8883                             | ask IT to allow outbound TCP 8883 to the MQTT host; readings keep flowing over HTTPS (443, device host) after 10 min — there is no WSS fallback yet (O-012) |
-| readings `clock_suspect` (PWA)  | NTP blocked                                               | allow outbound UDP 123 or the gateway's 4G link                                                                                                             |
-| Queue keeps growing             | no uplink                                                 | readings are safe on disk for 30 days; restore the uplink                                                                                                   |
+| Status page shows                       | Likely cause                                                                         | Fix                                                                                                                                                                           |
+| --------------------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| meter `not_found`                       | wrong Modbus ID or meter model, meter unpowered                                      | check the ID on the meter vs the PWA binding                                                                                                                                  |
+| meter `timeout` (was ok before)         | A/B swapped, cable cut, missing termination on a long run                            | swap A/B, check continuity, fit 120 Ω                                                                                                                                         |
+| meter `crc_error`                       | noise, wrong baud/parity, two meters with the same ID                                | check baud 9600 8N2, unique IDs, shield at one end                                                                                                                            |
+| Broker `disconnected`                   | building firewall blocks 8883                                                        | ask IT to allow outbound TCP 8883 to the MQTT host; readings keep flowing over HTTPS (443, device host) after 10 min. If 8883 cannot be opened: WebSocket fallback, see below |
+| Broker `disconnected`, 8883 open        | agent older than protocol 1.2 (no device JWT), gateway retired / certificate revoked | update the agent (OTA or `install.sh --binary`); the office checks the gateway in the admin fleet page (`mqtt.authn_denied` audit rows)                                       |
+| Broker `connected (WebSocket fallback)` | 8883 blocked, fallback in use                                                        | expected only for gateways listed for the fallback; ask IT again for 8883 and switch the fallback off once open                                                               |
+| readings `clock_suspect` (PWA)          | NTP blocked                                                                          | allow outbound UDP 123 or the gateway's 4G link                                                                                                                               |
+| Queue keeps growing                     | no uplink                                                                            | readings are safe on disk for 30 days; restore the uplink                                                                                                                     |
 
 ## Outbound connections the building must allow
 
 | To                                                                             | Port     | What                                                                        |
 | ------------------------------------------------------------------------------ | -------- | --------------------------------------------------------------------------- |
-| MQTT host (`mqtt.getproperty.co`, UAT: collective-infra `caddy/sites.uat.yml`) | TCP 8883 | MQTT 5 + mutual TLS — the normal path                                       |
+| MQTT host (`mqtt.getproperty.co`, UAT: collective-infra `caddy/sites.uat.yml`) | TCP 8883 | MQTT 5 + mutual TLS + device JWT (protocol 1.2) — the normal path           |
 | Device host (`device.getproperty.co`)                                          | TCP 443  | bootstrap, token, certificate renewal, config pull, HTTPS readings fallback |
-| OTA artefact host (from the signed manifest)                                   | TCP 443  | updates                                                                     |
+| MQTT host, WebSocket fallback only (`wss://mqtt.getproperty.co/mqtt`)          | TCP 443  | only for a gateway whose fallback the platform admin enabled (D-239)        |
 | NTP (`th.pool.ntp.org`)                                                        | UDP 123  | clock (`clock_suspect` without it)                                          |
 
-A building that cannot open 8883 is not onboarded in R1 (O-012: no WSS-on-443 fallback on the platform yet); the
-HTTPS fallback keeps readings flowing (and pulls the first config on a cold start) during an outage, but commands, health and OTA need
-MQTT.
+OTA updates come from the device host as well (api D-231), so no other destination is needed.
+
+### Building that cannot open outbound 8883 — WebSocket fallback (D-239)
+
+MQTT over `wss://<MQTT_HOST>/mqtt` on 443 is a **per-gateway exception**: on that path the gateway has no client
+certificate and logs in with its device JWT alone (risk accepted by the founder, api ADR-0015). Use it only when IT
+confirms 8883 cannot be opened:
+
+1. Ask the office / platform admin to enable the fallback for this gateway **before** the provisioning code is issued
+   (admin device page → _WebSocket fallback_, with the reason, e.g. the IT ticket). The URL arrives only with the
+   bootstrap answer: a gateway already provisioned needs a **new provisioning code** after the switch — re-provision:
+   `systemctl stop getproperty-edge`, `mv /var/lib/getproperty-edge/identity /var/lib/getproperty-edge/identity.old`,
+   start the service and enter the new code as in §5 (buffered readings stay in the queue; the cloud revokes the old
+   certificate; delete `identity.old` once the gateway is connected).
+2. Install with `install.sh … --mqtt-ws-fallback on` (or set `GP_MQTT_WS_FALLBACK=on` in
+   `/etc/getproperty-edge/agent.env` and `systemctl restart getproperty-edge`).
+3. Provision as in §5. The agent still tries 8883 first; after 3 failed attempts it switches and logs
+   `switching to the WebSocket fallback`; the status page shows _Broker connected (WebSocket fallback)_.
+4. Both switches are needed: the agent never uses WebSocket when the bootstrap answer had no `wsUrl`, and the broker
+   refuses it when the admin switches the fallback off (the agent then goes back to 8883).
+
+When 8883 is opened later: switch the fallback off in the admin page and set `GP_MQTT_WS_FALLBACK=off`.
+
+Without either path the HTTPS fallback keeps readings flowing (and pulls the first config on a cold start) during an
+outage, but commands, health and OTA need MQTT.
 
 ## Firewall (optional, recommended)
 
