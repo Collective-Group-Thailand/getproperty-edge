@@ -4,7 +4,11 @@
 //
 //   OTA_SIGNING_KEY_FILE=~/keys/gp-ota-2026.key OTA_KEY_ID=gp-ota-2026 \
 //   GP_OTA_PUBKEYS="$(cat trusted.json)" pnpm image --arch arm64 --node ./node-arm64/bin/node \
-//     --base-url https://releases.getproperty.co/edge --channel canary   # stable | beta | canary (protocol §6)
+//     --base-url https://device.getproperty.co/v1/device/ota/artifacts --channel canary   # stable | beta | canary
+//
+// --base-url (api D-231): the device host's artefact route. The api streams `releases/edge/<version>/<file>` of the
+// product bucket to the authenticated gateway, so the artefact URL is `<base>/<version>/<file>`; upload the binary
+// there before registering the manifest (api docs/deployment.md §5a). UAT: `https://<uat DEVICE_HOST>/v1/device/ota/artifacts`.
 import { execFileSync } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -17,7 +21,11 @@ const args = process.argv.slice(2);
 const opt = (n, d) => (args.indexOf(`--${n}`) >= 0 ? args[args.indexOf(`--${n}`) + 1] : d);
 const arch = opt('arch', hostArch());
 const channel = opt('channel', 'canary');
-const baseUrl = opt('base-url', 'https://releases.getproperty.invalid/edge');
+const baseUrl = opt('base-url', 'https://device.getproperty.co/v1/device/ota/artifacts');
+if (!/^https:\/\/[^/]+\/v1\/device\/ota\/artifacts\/?$/.test(baseUrl) && !opt('allow-foreign-base-url'))
+  throw new Error(
+    '--base-url must be https://<device host>/v1/device/ota/artifacts (api D-231); pass --allow-foreign-base-url 1 for a CDN',
+  );
 const keyFile = process.env.OTA_SIGNING_KEY_FILE;
 const keyId = process.env.OTA_KEY_ID;
 if (!keyFile || !keyId) throw new Error('OTA_SIGNING_KEY_FILE and OTA_KEY_ID are required');
@@ -81,3 +89,6 @@ writeFileSync(sums, [...kept, `${sha256}  ${name}`].join('\n') + '\n');
 for (const f of ['scripts/install.sh', 'scripts/ota-guard.sh', 'systemd/getproperty-edge.service'])
   copyFileSync(resolve(root, f), join(outDir, basename(f)));
 console.log(`image: ${outDir}/${name} sha256 ${sha256.slice(0, 16)}… signed by ${keyId} (${channel})`);
+console.log(
+  `upload: s3://collective-<env>-getproperty-assets/releases/edge/${version}/${name} before registering the manifest`,
+);

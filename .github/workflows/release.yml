@@ -36,14 +36,17 @@ jobs:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
           OTA_KEY_ID: ${{ vars.OTA_KEY_ID }}
           GP_OTA_PUBKEYS: ${{ vars.GP_OTA_PUBKEYS }}
+          GP_OTA_BASE_URL: ${{ vars.GP_OTA_BASE_URL }}
         run: |
           set -euo pipefail
           umask 077
           printf '%s' "$OTA_SIGNING_KEY" > "$RUNNER_TEMP/ota.key"
           export OTA_SIGNING_KEY_FILE="$RUNNER_TEMP/ota.key"
-          pnpm image --arch x64 --channel canary --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          pnpm image --arch arm64 --node "node-v${NODE_VERSION}-linux-arm64/bin/node" --channel canary \
-            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          # api D-231: gateways download from the device host, which streams releases/edge/<version>/<file> of the
+          # product bucket; the release engineer uploads the attached binaries there (api docs/deployment.md §5a).
+          base="${GP_OTA_BASE_URL:-https://device.getproperty.co/v1/device/ota/artifacts}"
+          pnpm image --arch x64 --channel canary --base-url "$base"
+          pnpm image --arch arm64 --node "node-v${NODE_VERSION}-linux-arm64/bin/node" --channel canary --base-url "$base"
           rm -f "$RUNNER_TEMP/ota.key"
       - name: Publish
         env:

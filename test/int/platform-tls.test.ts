@@ -30,7 +30,7 @@ describe('platform TLS path (D-230, O-012)', () => {
   beforeAll(async () => {
     tb = await new Testbed({
       mqttHost: MQTT_HOST,
-      // the real api always answers a wsUrl (MQTT_PUBLIC_WS_URL); a gateway must not use it in R1
+      // api D-231 omits wsUrl unless MQTT_PUBLIC_WS_URL is set; should one arrive, a gateway must not use it in R1
       mqttWsUrl: `wss://${MQTT_HOST}:${await closedPort()}/mqtt`,
       denyAction: 'disconnect',
     }).start();

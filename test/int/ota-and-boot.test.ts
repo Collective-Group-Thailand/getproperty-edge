@@ -42,7 +42,10 @@ describe('E1.4 — OTA through the broker, cold start budget', () => {
     const pub = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString();
     const priv = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
     const bin = Buffer.from(`#!/bin/sh\necho 0.2.0\n${'x'.repeat(200_000)}`);
-    tb.api.files.set('/releases/0.2.0/getproperty-edge', { body: bin, type: 'application/octet-stream' });
+    // api D-231: the artefact is served by the api on the device surface (from the product bucket's releases/edge/),
+    // so the download goes to the device host with the client certificate — the stub refuses /v1/device/* without one
+    const artefactPath = '/v1/device/ota/artifacts/0.2.0/getproperty-edge-0.2.0-linux-arm64';
+    tb.api.files.set(artefactPath, { body: bin, type: 'application/octet-stream' });
     const manifest = signManifest(
       {
         schema: 1,
@@ -50,7 +53,7 @@ describe('E1.4 — OTA through the broker, cold start budget', () => {
         channel: 'canary',
         arch: 'arm64',
         artifact: {
-          url: `${tb.api.baseUrl}/releases/0.2.0/getproperty-edge`,
+          url: `https://device.getproperty.test${artefactPath}`,
           sha256: createHash('sha256').update(bin).digest('hex'),
           size: bin.length,
         },
@@ -80,10 +83,10 @@ describe('E1.4 — OTA through the broker, cold start budget', () => {
     const cmd = JSON.stringify({
       cmdId,
       type: 'ota_apply',
-      // protocol §6: `<api>/v1/device/ota/manifest?releaseId=…` — the api builds it on PUBLIC_API_BASE_URL (the public
-      // API host, which strips client certificates on the platform, D-230); the agent fetches device paths from its
-      // device host (GP_API_URL) with mTLS + bearer (CR-012)
-      args: { manifestUrl: `https://api.getproperty.test/v1/device/ota/manifest?releaseId=${releaseId}` },
+      // protocol §6 / api D-231 (CR-012 done): the api sends the relative `/v1/device/ota/manifest?releaseId=…`; the
+      // agent fetches device paths from its device host (GP_API_URL) with mTLS + bearer. The older absolute form on the
+      // public API host resolves the same way (test/unit/platform.test.ts).
+      args: { manifestUrl: `/v1/device/ota/manifest?releaseId=${releaseId}` },
       issuedAt: new Date().toISOString(),
     });
     for (let i = 0; i < 10 && !tb.ingest.acks.some((a) => a.cmdId === cmdId); i++) {
@@ -94,6 +97,7 @@ describe('E1.4 — OTA through the broker, cold start budget', () => {
     expect(readlinkSync(join(otaRoot, 'slots', 'current'))).toBe('b');
     expect(readFileSync(join(otaRoot, 'slots', 'b', 'getproperty-edge'))).toEqual(bin);
     expect(tb.api.calls).toContain('GET /v1/device/ota/manifest');
+    expect(tb.api.calls).toContain(`GET ${artefactPath}`);
 
     // systemd starts `current` = the new version on the same state dir
     const env = agent['d'].env;

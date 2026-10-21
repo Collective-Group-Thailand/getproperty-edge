@@ -85,8 +85,12 @@ re-baselines the counter; a changed `litresPerPulse` re-baselines at the current
    code cache, so it is architecture-independent). Smoke-test on the gateway: `./getproperty-edge --version`.
 3. `pnpm image` signs a release (`OTA_SIGNING_KEY_FILE`, `OTA_KEY_ID`, `--channel canary|pilot|all`,
    `--base-url`): `dist/release/<version>/` holds the binary, `manifest-<arch>.json` (ed25519-signed),
-   `SHA256SUMS`, `install.sh`, `ota-guard.sh` and the systemd unit. The api's OTA rollout serves the
-   manifest at `/v1/device/ota/manifest` (CR-011).
+   `SHA256SUMS`, `install.sh`, `ota-guard.sh` and the systemd unit. `--base-url` defaults to the production
+   device host's artefact route `https://device.getproperty.co/v1/device/ota/artifacts` (api D-231; UAT: the uat
+   `DEVICE_HOST`); upload the binary to `s3://collective-<env>-getproperty-assets/releases/edge/<version>/<file>`
+   (release-publisher policy), then register the manifest — the api refuses it until the object exists. The api's
+   OTA rollout serves the manifest at `/v1/device/ota/manifest` (CR-011) and the binary at
+   `/v1/device/ota/artifacts/<version>/<file>`, both on the device host with the gateway's client certificate.
 4. On a fresh gateway (Raspberry Pi OS Lite 64-bit / Debian 12 arm64, `apt install gpiod`):
    `sudo ./install.sh --binary ./getproperty-edge-<version>-linux-arm64` (`--api-url` defaults to the production
    device host `https://device.getproperty.co`; UAT: the `DEVICE_HOST` of collective-infra `caddy/sites.uat.yml`).

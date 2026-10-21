@@ -47,7 +47,7 @@ describe('platform endpoints (D-230, O-012)', () => {
 
   it('device paths go to the device host with credentials; other origins never get them', () => {
     const device = 'https://device.getproperty.co';
-    // the api builds manifestUrl on PUBLIC_API_BASE_URL (public API host strips client certificates)
+    // older api builds put manifestUrl on PUBLIC_API_BASE_URL (public API host strips client certificates); still works
     const m = deviceRoute('https://api.getproperty.co/v1/device/ota/manifest?releaseId=r1', device);
     expect(m.url.href).toBe('https://device.getproperty.co/v1/device/ota/manifest?releaseId=r1');
     expect(m.credentials).toBe(true);
@@ -60,6 +60,15 @@ describe('platform endpoints (D-230, O-012)', () => {
     );
     expect(s3.url.hostname).toBe('collective-prod-getproperty-assets.s3.ap-southeast-7.amazonaws.com');
     expect(s3.credentials).toBe(false);
+    // api D-231: artefacts on the device surface → device host with credentials
+    const art = deviceRoute(
+      'https://device.getproperty.co/v1/device/ota/artifacts/0.2.0/getproperty-edge-0.2.0-linux-arm64',
+      device,
+    );
+    expect(art.url.href).toBe(
+      'https://device.getproperty.co/v1/device/ota/artifacts/0.2.0/getproperty-edge-0.2.0-linux-arm64',
+    );
+    expect(art.credentials).toBe(true);
     const cdn = deviceRoute('https://releases.getproperty.co/edge/0.2.0/getproperty-edge-0.2.0-linux-arm64', device);
     expect(cdn.credentials).toBe(false);
     expect(deviceRoute('https://device.getproperty.co/releases/x', device).credentials).toBe(true);

@@ -18,7 +18,7 @@ export interface ApiStubOptions {
   ca: TestCa;
   server: { certPem: string; keyPem: string };
   mqttUrl: string;
-  /** `mqtt.wsUrl` of the bootstrap answer — the real api always sends one (MQTT_PUBLIC_WS_URL). */
+  /** `mqtt.wsUrl` of the bootstrap answer — the real api sends one only when MQTT_PUBLIC_WS_URL is set (D-231). */
   mqttWsUrl?: string;
   ingest?: IngestStub;
   /** Validity of issued device certificates. */

@@ -20,7 +20,7 @@ export interface TestbedOptions {
    * device host. Unset = `mqtts://127.0.0.1:<port>` with a localhost/127.0.0.1 certificate.
    */
   mqttHost?: string;
-  /** `mqtt.wsUrl` in the bootstrap answer (the real api always sends one). */
+  /** `mqtt.wsUrl` in the bootstrap answer (the real api: only when MQTT_PUBLIC_WS_URL is set, D-231). */
   mqttWsUrl?: string;
   denyAction?: 'puback' | 'disconnect';
 }
