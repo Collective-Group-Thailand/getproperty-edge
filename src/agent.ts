@@ -45,6 +45,31 @@ import type { Logger, LogRing } from './util/logger.js';
 import { isoWithOffset } from './util/time.js';
 import { AGENT_VERSION } from './version.js';
 
+/**
+ * The WebSocket fallback URL the link may use (D-239, O-012 resolved): only when the API enabled it for this gateway
+ * (bootstrap `mqtt.wsUrl`, set by the platform admin per gateway) **and** the gateway's own `GP_MQTT_WS_FALLBACK=on`
+ * (api deployment §5 step 3). Never derived from the 8883 URL, never without the bootstrap's answer.
+ */
+export function wsFallbackUrl(id: Identity, env: AgentEnv, logger: Logger): string | undefined {
+  if (id.mqttWsUrl && env.mqttWsFallback) {
+    logger.warn(
+      { wsUrl: id.mqttWsUrl },
+      'mqtt: WebSocket fallback enabled for this gateway — used only when 8883 fails; device JWT only, no client certificate (D-239)',
+    );
+    return id.mqttWsUrl;
+  }
+  if (id.mqttWsUrl)
+    logger.info(
+      { httpsFallbackAfterS: env.httpsFallbackAfterS },
+      'mqtt: 8883 only — the platform offers a WebSocket fallback but GP_MQTT_WS_FALLBACK is off',
+    );
+  else if (env.mqttWsFallback)
+    logger.warn(
+      'mqtt: GP_MQTT_WS_FALLBACK=on but the platform has not enabled the fallback for this gateway (no mqtt.wsUrl in the bootstrap answer) — 8883 only; re-provision after the platform admin enabled it',
+    );
+  return undefined;
+}
+
 export interface AgentDeps {
   env: AgentEnv;
   logger: Logger;
@@ -73,6 +98,10 @@ export interface AgentDeps {
     backoffBaseMs?: number;
     backoffMaxMs?: number;
     connectTimeoutMs?: number;
+    failoverAfter?: number;
+    rotateLeadMs?: number;
+    rotateJitterMs?: number;
+    primaryRetryMs?: number;
     lookup?: LookupFunction;
   };
   statusPage?: boolean;
@@ -269,19 +298,17 @@ export class Agent {
     if (this.uncleanStart)
       this.emitEvent('power_loss', 'warning', { message: 'previous run ended without a clean shutdown' });
 
-    if (id.mqttWsUrl && !env.mqttWsFallback)
-      this.d.logger.info(
-        { httpsFallbackAfterS: env.httpsFallbackAfterS },
-        'mqtt: 8883 only — WSS fallback disabled (O-012, GP_MQTT_WS_FALLBACK); the HTTPS readings fallback covers outages',
-      );
+    const wsUrl = wsFallbackUrl(id, env, this.d.logger);
     const link =
       this.d.linkFactory?.(id) ??
       new MqttLink({
         gatewayId: id.gatewayId,
         url: env.mqttUrlOverride ?? id.mqttUrl,
-        // O-012: no WSS fallback unless explicitly enabled (and then still device-CA + client certificate only)
-        ...(id.mqttWsUrl && env.mqttWsFallback ? { wsUrl: id.mqttWsUrl } : {}),
+        ...(wsUrl ? { wsUrl } : {}),
         credentials: () => this.identityStore.credentials()!,
+        // protocol 1.2 (D-235, D-244): the device JWT is the MQTT password, on 8883 and on the WebSocket fallback
+        password: ({ fresh }) => this.tokens.mqttPassword({ fresh }),
+        ...(id.mqttAcl ? { acl: id.mqttAcl } : {}),
         logger: this.d.logger,
         clock: systemClock,
         ...(env.mqttServername ? { servername: env.mqttServername } : {}),
@@ -548,6 +575,7 @@ export class Agent {
       configVersion: this.config.version(),
       link: {
         broker: this.link?.connected ? 'connected' : 'disconnected',
+        ...(this.link instanceof MqttLink ? { transport: this.link.transport } : {}),
         type: sys.link,
         rssi: sys.rssi,
         httpsFallback: this.forwarder?.usingHttpsFallback ?? false,

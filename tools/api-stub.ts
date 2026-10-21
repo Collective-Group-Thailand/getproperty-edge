@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer, type Server } from 'node:https';
 import type { AddressInfo } from 'node:net';
@@ -18,7 +18,10 @@ export interface ApiStubOptions {
   ca: TestCa;
   server: { certPem: string; keyPem: string };
   mqttUrl: string;
-  /** `mqtt.wsUrl` of the bootstrap answer — the real api sends one only when MQTT_PUBLIC_WS_URL is set (D-231). */
+  /**
+   * `MQTT_PUBLIC_WS_URL`: the bootstrap answer carries it as `mqtt.wsUrl` only for a gateway whose WebSocket fallback
+   * the platform admin enabled (`wsFallback`, D-239).
+   */
   mqttWsUrl?: string;
   ingest?: IngestStub;
   /** Validity of issued device certificates. */
@@ -38,6 +41,19 @@ export class ApiStub {
   readonly configs = new Map<string, unknown>();
   readingsDown = false;
   tokenSeq = 0;
+  /** Lifetime of issued device JWTs (`DEVICE_ACCESS_TOKEN_TTL_SECONDS`, ≤ 1 h on the platform). */
+  tokenTtlMs = 900_000;
+  /** The next N `POST /v1/device/token` calls answer 503 (API outage). */
+  tokenOutages = 0;
+  /** Gateways whose `smart.device.mqtt_ws_fallback` is on (D-239). */
+  readonly wsFallback = new Set<string>();
+  /** Retired / revoked gateways: no tokens, every token of theirs invalid. */
+  readonly retired = new Set<string>();
+  /** Individual tokens whose session was revoked. */
+  readonly revokedTokens = new Set<string>();
+  /** Every device JWT issued, in order. */
+  readonly issued: Array<{ gatewayId: string; token: string; exp: number }> = [];
+  private readonly jwtKey = randomBytes(32);
 
   constructor(private readonly o: ApiStubOptions) {}
 
@@ -45,9 +61,43 @@ export class ApiStub {
     return `https://127.0.0.1:${this.port}`;
   }
 
-  addCode(code: string, gatewayId: string = randomUUID()): string {
+  addCode(code: string, gatewayId: string = randomUUID(), opts: { wsFallback?: boolean } = {}): string {
     this.codes.set(code, gatewayId);
+    if (opts.wsFallback) this.wsFallback.add(gatewayId);
     return gatewayId;
+  }
+
+  /** A device JWT (HS256, `aud=device`, `sub` = gatewayId) like `POST /v1/device/token`. */
+  issueToken(gatewayId: string): { accessToken: string; expiresAt: string } {
+    const exp = Date.now() + this.tokenTtlMs;
+    const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const body = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({
+      aud: 'device',
+      sub: gatewayId,
+      jti: `t${++this.tokenSeq}`,
+      exp: exp / 1000,
+    })}`;
+    const token = `${body}.${createHmac('sha256', this.jwtKey).update(body).digest('base64url')}`;
+    this.issued.push({ gatewayId, token, exp });
+    return { accessToken: token, expiresAt: new Date(exp).toISOString() };
+  }
+
+  /** The EMQX authn check of the API: signature, `aud=device`, unexpired, session not revoked → the gateway id. */
+  verifyToken(token: string | undefined): string | null {
+    if (!token || this.revokedTokens.has(token)) return null;
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const sig = createHmac('sha256', this.jwtKey).update(`${parts[0]}.${parts[1]}`).digest();
+    const given = Buffer.from(parts[2]!, 'base64url');
+    if (given.length !== sig.length || !timingSafeEqual(given, sig)) return null;
+    const claims = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString()) as {
+      aud?: string;
+      sub?: string;
+      exp?: number;
+    };
+    if (claims.aud !== 'device' || typeof claims.sub !== 'string' || !claims.exp || claims.exp * 1000 <= Date.now())
+      return null;
+    return this.retired.has(claims.sub) ? null : claims.sub;
   }
 
   async start(): Promise<number> {
@@ -102,24 +152,39 @@ export class ApiStub {
           days: this.o.certDays ?? 365,
           ...(this.o.certNotBefore ? { notBefore: this.o.certNotBefore() } : {}),
         });
+        const login = `gw-${gw}`;
         return this.json(res, 201, {
           gatewayId: gw,
+          deviceId: gw,
           certificatePem,
           caChainPem: this.o.ca.certPem,
-          mqtt: { url: this.o.mqttUrl, ...(this.o.mqttWsUrl ? { wsUrl: this.o.mqttWsUrl } : {}) },
-          deviceToken: {
-            accessToken: `tok-${++this.tokenSeq}`,
-            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          mqtt: {
+            url: this.o.mqttUrl,
+            ...(this.o.mqttWsUrl && this.wsFallback.has(gw) ? { wsUrl: this.o.mqttWsUrl } : {}),
+            clientId: login,
+            username: login,
+            password: 'device_jwt',
+            acl: [
+              ...['telemetry', 'health', 'events', 'cmd/ack'].map((t) => ({
+                action: 'publish',
+                topic: `gp/v1/${gw}/${t}`,
+              })),
+              ...['config', 'cmd'].map((t) => ({ action: 'subscribe', topic: `gp/v1/${gw}/${t}` })),
+            ],
           },
+          deviceToken: this.issueToken(gw),
         });
       }
       const cn = this.clientCn(req);
       if (url.pathname.startsWith('/v1/device/') && !cn) return this.problem(res, 401, 'auth.unauthenticated');
       if (req.method === 'POST' && url.pathname === '/v1/device/token') {
-        return this.json(res, 200, {
-          accessToken: `tok-${++this.tokenSeq}`,
-          expiresAt: new Date(Date.now() + 900_000).toISOString(),
-        });
+        if (this.tokenOutages > 0) {
+          this.tokenOutages--;
+          return this.problem(res, 503, 'service_unavailable');
+        }
+        const gw = cn!.replace(/^gw-/, '');
+        if (this.retired.has(gw)) return this.problem(res, 401, 'auth.unauthenticated');
+        return this.json(res, 200, this.issueToken(gw));
       }
       if (req.method === 'POST' && url.pathname === '/v1/device/certificate/renew') {
         const b = JSON.parse(body.toString()) as { csrPem: string };

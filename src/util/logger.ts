@@ -33,6 +33,8 @@ const REDACT = [
   '*.privateKey',
   'authorization',
   '*.authorization',
+  'password',
+  '*.password',
   'headers.authorization',
 ];
 

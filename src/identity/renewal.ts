@@ -75,6 +75,7 @@ export class CertificateRenewer {
       gatewayId: id.gatewayId,
       mqttUrl: id.mqttUrl,
       ...(id.mqttWsUrl ? { mqttWsUrl: id.mqttWsUrl } : {}),
+      ...(id.mqttAcl ? { mqttAcl: id.mqttAcl } : {}),
       certPem: res.certificatePem,
       keyPem,
       caPem: res.caChainPem,

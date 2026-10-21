@@ -1,5 +1,5 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -30,8 +30,8 @@ describe('agent process resource budget', () => {
   let child: ChildProcess | undefined;
   beforeAll(async () => {
     tb = await new Testbed({ keepReadings: false }).start();
-    if (!existsSync('dist/getproperty-edge.cjs'))
-      execFileSync(process.execPath, ['scripts/build.mjs'], { stdio: 'inherit' });
+    // always rebuild: a stale bundle would measure (and log in as) an older agent — protocol 1.2 refuses those
+    execFileSync(process.execPath, ['scripts/build.mjs'], { stdio: 'inherit' });
   });
   afterAll(async () => {
     child?.kill('SIGKILL');

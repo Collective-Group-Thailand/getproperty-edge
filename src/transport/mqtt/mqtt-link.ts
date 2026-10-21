@@ -4,8 +4,9 @@ import { isIP } from 'node:net';
 
 import mqtt, { type IClientOptions, type MqttClient } from 'mqtt';
 
+import type { MqttAcl } from '../../identity/identity-store.js';
 import { lwtPayload, topic } from '../../protocol/envelopes.js';
-import type { TopicSuffix } from '../../protocol/types.js';
+import { MQTT_ACL, type TopicSuffix } from '../../protocol/types.js';
 import { Backoff } from '../../util/backoff.js';
 import { type Clock, systemClock, type TimerHandle } from '../../util/clock.js';
 import type { Logger } from '../../util/logger.js';
@@ -17,12 +18,24 @@ export interface MqttCredentials {
   ca: string;
 }
 
+/** A device JWT used as the MQTT password (protocol 1.2). */
+export interface MqttPassword {
+  accessToken: string;
+  expiresAt: string;
+}
+
+/** `mtls` = EMQX 8883 with the client certificate; `wss` = the per-gateway WebSocket fallback behind Caddy (D-239). */
+export type MqttTransport = 'mtls' | 'wss';
+
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
+/** CONNACK reason codes of a refused login (MQTT 5): bad user name or password, not authorized, bad auth method. */
+const AUTH_REFUSED = new Set([0x86, 0x87, 0x8c]);
+
 /**
- * Broker URLs must be TLS (`mqtts://`, `wss://`): the gateway authenticates with its client certificate and verifies
- * the broker against the bootstrap CA only. Plain `mqtt://` / `ws://` is accepted for a loopback dev broker alone —
- * never a silent downgrade to an unauthenticated path (D-230, O-012).
+ * Broker URLs must be TLS (`mqtts://`, `wss://`): the gateway verifies the broker against the bootstrap CA only.
+ * Plain `mqtt://` / `ws://` is accepted for a loopback dev broker alone — never a silent downgrade to an
+ * unauthenticated path (D-230, D-239).
  */
 export function assertSecureBrokerUrl(raw: string): void {
   let u: URL;
@@ -36,23 +49,43 @@ export function assertSecureBrokerUrl(raw: string): void {
   throw new Error(`refusing non-TLS broker URL ${u.protocol}//${u.host}`);
 }
 
+/** Topic suffixes the link may publish / subscribe to: the contract's `x-acl` ∩ the bootstrap ACL (when stored). */
+export function effectiveAcl(acl?: MqttAcl): { publish: Set<string>; subscribe: Set<string> } {
+  const narrow = (base: readonly string[], granted?: string[]) =>
+    new Set(granted ? base.filter((t) => granted.includes(t)) : base);
+  return { publish: narrow(MQTT_ACL.publish, acl?.publish), subscribe: narrow(MQTT_ACL.subscribe, acl?.subscribe) };
+}
+
 export interface MqttLinkOptions {
   gatewayId: string;
   /** Primary broker URL: EMQX's mutual-TLS listener, e.g. `mqtts://mqtt.getproperty.co:8883` (D-230). */
   url: string;
   /**
-   * WebSocket fallback for buildings that block 8883 (protocol §1). **Not available on the R1 platform** (O-012):
-   * the agent passes it only when `GP_MQTT_WS_FALLBACK=on`, and the WSS endpoint is held to the same rules as 8883
-   * (server certificate from the bootstrap CA, client certificate presented) — it fails closed otherwise.
+   * WebSocket fallback `wss://<MQTT_HOST>/mqtt` (D-239): passed only when the API enabled it for this gateway (bootstrap
+   * `mqtt.wsUrl`) **and** `GP_MQTT_WS_FALLBACK=on`. TLS ends at the platform's Caddy, whose certificate must chain to
+   * the bootstrap CA (fails closed otherwise); no client certificate on that path — the device JWT alone.
    */
   wsUrl?: string;
   credentials: () => MqttCredentials;
+  /**
+   * Protocol 1.2: the MQTT password is a device JWT of this gateway, obtained before every (re)connect (`fresh` after a
+   * refused CONNECT and for the rotation before expiry). Without a token the link does not connect.
+   */
+  password: (opts: { fresh: boolean }) => Promise<MqttPassword>;
+  /** Bootstrap ACL (protocol 1.2); absent for older identities — the contract's `x-acl` applies. */
+  acl?: MqttAcl;
   keepaliveS?: number;
   backoffBaseMs?: number;
   backoffMaxMs?: number;
   connectTimeoutMs?: number;
-  /** Consecutive failures on one URL before trying the other. */
+  /** Consecutive transport failures on one URL before trying the other. */
   failoverAfter?: number;
+  /** Rotate the password this long before the token expires (capped at a quarter of its lifetime). Default 5 min. */
+  rotateLeadMs?: number;
+  /** Extra random lead (spreads a fleet's reconnects; capped at a tenth of the lifetime). Default 2 min. */
+  rotateJitterMs?: number;
+  /** While on the WebSocket fallback, the first rotation after this long tries 8883 once again. Default 1 h. */
+  primaryRetryMs?: number;
   servername?: string;
   /** Custom DNS lookup (tests inject DNS failures). */
   lookup?: LookupFunction;
@@ -62,28 +95,41 @@ export interface MqttLinkOptions {
 }
 
 /**
- * MQTT 5 over TLS with the gateway's client certificate (protocol §1): keepalive 30 s, LWT on /health,
- * exponential backoff with jitter, retained /config and /cmd subscriptions re-established on every
- * connect (clean start). QoS 1 publishes resolve on PUBACK; on link loss every unacknowledged publish
- * is rejected so the caller re-sends from its on-disk queue (no hidden in-memory redelivery).
+ * MQTT 5 over TLS (protocol §1, revision 1.2): client id = username = `gw-<gatewayId>` (= certificate CN on 8883),
+ * password = a device JWT fetched before every (re)connect and rotated (graceful DISCONNECT + reconnect, so no LWT)
+ * shortly before it expires; keepalive 30 s, LWT on /health, exponential backoff with jitter, /config (retained) and
+ * /cmd re-subscribed on every connect (clean start). Publishes only to the four ACL topics. QoS 1 publishes resolve on
+ * PUBACK; on link loss every unacknowledged publish is rejected so the caller re-sends from its on-disk queue (no
+ * hidden in-memory redelivery).
  */
 export class MqttLink extends EventEmitter implements Link {
   private client: MqttClient | undefined;
   private readonly backoff: Backoff;
   private reconnectTimer: TimerHandle | undefined;
+  private rotateTimer: TimerHandle | undefined;
   private stopped = true;
+  private gen = 0;
   private failuresOnUrl = 0;
   private useWs = false;
+  private wsSince = 0;
+  private probingPrimary = false;
+  private nextFresh = false;
+  private authRefused = false;
+  private passwordExp = 0;
   private isConnected = false;
   private lastConnectedAt: number | null = null;
   private readonly clock: Clock;
+  private readonly random: () => number;
+  private readonly acl: { publish: Set<string>; subscribe: Set<string> };
 
   constructor(private readonly opts: MqttLinkOptions) {
     super();
     this.clock = opts.clock ?? systemClock;
+    this.random = opts.random ?? Math.random;
     this.backoff = new Backoff(opts.backoffBaseMs ?? 1000, opts.backoffMaxMs ?? 120_000, opts.random);
     assertSecureBrokerUrl(opts.url);
     if (opts.wsUrl) assertSecureBrokerUrl(opts.wsUrl);
+    this.acl = effectiveAcl(opts.acl);
   }
 
   get connected(): boolean {
@@ -94,8 +140,17 @@ export class MqttLink extends EventEmitter implements Link {
     return this.lastConnectedAt;
   }
 
+  get transport(): MqttTransport {
+    return this.useWs && this.opts.wsUrl ? 'wss' : 'mtls';
+  }
+
   get currentUrl(): string {
-    return this.useWs && this.opts.wsUrl ? this.opts.wsUrl : this.opts.url;
+    return this.transport === 'wss' ? this.opts.wsUrl! : this.opts.url;
+  }
+
+  /** Expiry (epoch ms) of the device JWT the current session logged in with; 0 before the first connect. */
+  get passwordExpiresAt(): number {
+    return this.passwordExp;
   }
 
   start(): void {
@@ -104,16 +159,18 @@ export class MqttLink extends EventEmitter implements Link {
     this.connect();
   }
 
-  /** Re-reads the credentials (after certificate renewal) and reconnects. */
+  /** Re-reads the credentials (after certificate renewal) and reconnects — gracefully, so the broker sends no LWT. */
   restart(): void {
-    this.teardown();
+    this.teardown(true);
     this.backoff.reset();
     if (!this.stopped) this.connect();
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.gen++;
     this.clock.clearTimeout(this.reconnectTimer);
+    this.clock.clearTimeout(this.rotateTimer);
     const c = this.client;
     this.client = undefined;
     if (c) {
@@ -124,6 +181,8 @@ export class MqttLink extends EventEmitter implements Link {
   }
 
   publish(suffix: TopicSuffix, payload: string): Promise<void> {
+    // protocol 1.2: anything outside the four publish topics disconnects the gateway (EMQX deny_action = disconnect)
+    if (!this.acl.publish.has(suffix)) return Promise.reject(new Error(`mqtt: ${suffix} is not in the gateway ACL`));
     const c = this.client;
     if (!c || !this.isConnected) return Promise.reject(new Error('mqtt: not connected'));
     return new Promise((resolve, reject) => {
@@ -133,20 +192,45 @@ export class MqttLink extends EventEmitter implements Link {
     });
   }
 
+  /** Fetches a device JWT, then opens the connection; a missing token means no connect (retried with back-off). */
   private connect(): void {
-    const creds = this.opts.credentials();
+    const gen = ++this.gen;
+    const fresh = this.nextFresh;
+    this.nextFresh = false;
+    this.opts.password({ fresh }).then(
+      (pw) => {
+        if (gen === this.gen && !this.stopped) this.open(pw);
+      },
+      (err: unknown) => {
+        if (gen !== this.gen || this.stopped) return;
+        this.nextFresh = true;
+        this.opts.logger.warn(
+          { err: (err as Error).message },
+          'mqtt: no device token for the broker login (protocol 1.2) — retrying',
+        );
+        this.scheduleReconnect();
+      },
+    );
+  }
+
+  private open(pw: MqttPassword): void {
     const gw = this.opts.gatewayId;
+    const clientId = `gw-${gw}`;
+    const transport = this.transport;
+    const url = this.currentUrl;
+    const creds = this.opts.credentials();
+    this.authRefused = false;
     const options: IClientOptions = {
       protocolVersion: 5,
-      clientId: `gw-${gw}`,
+      clientId,
+      username: clientId,
+      password: pw.accessToken,
       clean: true,
       keepalive: this.opts.keepaliveS ?? 30,
       reconnectPeriod: 0,
       connectTimeout: this.opts.connectTimeoutMs ?? 15_000,
       resubscribe: false,
       queueQoSZero: false,
-      key: creds.key,
-      cert: creds.cert,
       // the bootstrap CA chain is the only trust anchor (no system roots); hostname checked against the SAN
       ca: creds.ca,
       rejectUnauthorized: true,
@@ -155,12 +239,14 @@ export class MqttLink extends EventEmitter implements Link {
     if (this.opts.servername) options.servername = this.opts.servername;
     (options as IClientOptions & { minVersion?: string }).minVersion = 'TLSv1.2';
     if (this.opts.lookup) (options as IClientOptions & { lookup?: LookupFunction }).lookup = this.opts.lookup;
-    const url = this.currentUrl;
-    if (url.startsWith('wss:')) {
+    if (transport === 'mtls') {
+      options.key = creds.key;
+      options.cert = creds.cert;
+    } else {
+      // D-239: TLS ends at Caddy — its certificate must chain to the bootstrap CA; no client certificate is sent (the
+      // device JWT is the only credential on this path). key/cert stay unset so mqtt.js copies none into wsOptions.
       const host = new URL(url).hostname;
       options.wsOptions = {
-        key: creds.key,
-        cert: creds.cert,
         ca: creds.ca,
         rejectUnauthorized: true,
         minVersion: 'TLSv1.2',
@@ -168,6 +254,7 @@ export class MqttLink extends EventEmitter implements Link {
         ...(this.opts.lookup ? { lookup: this.opts.lookup } : {}),
       };
     }
+    this.passwordExp = Date.parse(pw.expiresAt);
     const c = mqtt.connect(url, options);
     this.client = c;
 
@@ -175,14 +262,20 @@ export class MqttLink extends EventEmitter implements Link {
       if (this.client !== c) return;
       this.failuresOnUrl = 0;
       this.backoff.reset();
-      c.subscribe([topic(gw, 'config'), topic(gw, 'cmd')], { qos: 1 }, (err, granted) => {
+      if (this.probingPrimary) {
+        this.probingPrimary = false;
+        this.opts.logger.info({ url }, 'mqtt: 8883 reachable again — left the WebSocket fallback');
+      }
+      const subs = [...this.acl.subscribe].map((s) => topic(gw, s as TopicSuffix));
+      c.subscribe(subs, { qos: 1 }, (err, granted) => {
         if (err || granted?.some((g) => g.qos > 1)) {
           this.opts.logger.error({ err, granted }, 'mqtt subscribe rejected');
         }
       });
       this.lastConnectedAt = this.clock.now();
+      this.scheduleRotation();
       this.setConnected(true);
-      this.opts.logger.info({ url }, 'mqtt connected');
+      this.opts.logger.info({ url, transport }, 'mqtt connected');
     });
     c.on('message', (t, payload) => {
       const prefix = `gp/v1/${gw}/`;
@@ -190,21 +283,100 @@ export class MqttLink extends EventEmitter implements Link {
       this.emit('message', t.slice(prefix.length), payload);
     });
     c.on('error', (err) => {
+      const code = (err as Error & { code?: unknown }).code;
+      if (typeof code === 'number' && AUTH_REFUSED.has(code)) {
+        // protocol §1: on a refused login fetch a new token and retry with back-off
+        this.authRefused = true;
+        this.nextFresh = true;
+        this.opts.logger.warn({ code, url, transport }, 'mqtt: broker refused the login — will retry with a new token');
+        return;
+      }
       this.opts.logger.warn({ err: err.message, url }, 'mqtt error');
     });
     c.on('close', () => {
       if (this.client !== c) return;
+      this.clock.clearTimeout(this.rotateTimer);
       this.failInflight(c);
       const wasConnected = this.isConnected;
       this.setConnected(false);
-      if (!wasConnected) this.failuresOnUrl++;
-      if (this.opts.wsUrl && this.failuresOnUrl >= (this.opts.failoverAfter ?? 3)) {
-        this.useWs = !this.useWs;
-        this.failuresOnUrl = 0;
-        this.opts.logger.warn({ url: this.currentUrl }, 'mqtt failing over');
-      }
+      if (!wasConnected) this.onConnectFailed(transport);
       this.scheduleReconnect();
     });
+  }
+
+  /**
+   * A connect that never reached CONNACK 0. Transport failures count towards failover; a refused login on 8883 does
+   * not (the WebSocket path checks the same token), but one on the fallback does (the admin may have switched it off).
+   */
+  private onConnectFailed(transport: MqttTransport): void {
+    if (transport === 'mtls' && this.authRefused) return;
+    if (!this.opts.wsUrl) return;
+    if (this.probingPrimary) {
+      this.probingPrimary = false;
+      this.useWs = true;
+      this.wsSince = this.clock.now();
+      this.opts.logger.warn({ url: this.currentUrl }, 'mqtt: 8883 still unreachable — back on the WebSocket fallback');
+      return;
+    }
+    this.failuresOnUrl++;
+    if (this.failuresOnUrl < (this.opts.failoverAfter ?? 3)) return;
+    this.failuresOnUrl = 0;
+    this.useWs = !this.useWs;
+    if (this.useWs) {
+      this.wsSince = this.clock.now();
+      this.opts.logger.warn(
+        { url: this.currentUrl },
+        'mqtt: 8883 unreachable — switching to the WebSocket fallback enabled for this gateway (device JWT only, no client certificate; D-239)',
+      );
+    } else {
+      this.opts.logger.warn({ url: this.currentUrl }, 'mqtt: WebSocket fallback failing — back to 8883');
+    }
+  }
+
+  /** Rotation before the password expires: fetch first, then reconnect; a failed fetch keeps the live session. */
+  private scheduleRotation(): void {
+    this.clock.clearTimeout(this.rotateTimer);
+    if (!Number.isFinite(this.passwordExp)) return;
+    const lifetime = this.passwordExp - this.clock.now();
+    const lead = Math.min(this.opts.rotateLeadMs ?? 5 * 60_000, Math.max(0, lifetime / 4));
+    const jitter = this.random() * Math.min(this.opts.rotateJitterMs ?? 2 * 60_000, Math.max(0, lifetime / 10));
+    this.armRotation(Math.max(1000, lifetime - lead - jitter));
+  }
+
+  private armRotation(delayMs: number): void {
+    this.clock.clearTimeout(this.rotateTimer);
+    this.rotateTimer = this.clock.setTimeout(() => void this.rotate(), delayMs);
+  }
+
+  private async rotate(): Promise<void> {
+    const c = this.client;
+    if (this.stopped || !c || !this.isConnected) return;
+    const gen = this.gen;
+    let pw: MqttPassword;
+    try {
+      pw = await this.opts.password({ fresh: true });
+    } catch (err) {
+      if (gen !== this.gen || this.client !== c) return;
+      // the broker checks the password only at CONNECT: keep the working session, try again soon
+      const left = this.passwordExp - this.clock.now();
+      const retry = Math.min(60_000, Math.max(5_000, left / 2));
+      this.opts.logger.warn(
+        { err: (err as Error).message, retryInMs: retry },
+        'mqtt: device token refresh failed — keeping the session',
+      );
+      this.armRotation(retry);
+      return;
+    }
+    if (gen !== this.gen || this.client !== c || this.stopped) return;
+    if (this.useWs && this.clock.now() - this.wsSince >= (this.opts.primaryRetryMs ?? 3_600_000)) {
+      this.useWs = false;
+      this.probingPrimary = true;
+    }
+    this.opts.logger.info({ transport: this.transport }, 'mqtt: device token rotated — reconnecting with it');
+    this.teardown(true);
+    this.backoff.reset();
+    this.gen++;
+    this.open(pw);
   }
 
   private scheduleReconnect(): void {
@@ -219,14 +391,17 @@ export class MqttLink extends EventEmitter implements Link {
     }, delay);
   }
 
-  private teardown(): void {
+  /** Drops the client; `graceful` sends DISCONNECT (normal) first so the broker does not publish the LWT. */
+  private teardown(graceful = false): void {
+    this.clock.clearTimeout(this.rotateTimer);
     const c = this.client;
     this.client = undefined;
     if (c) {
       this.failInflight(c);
       c.removeAllListeners();
       c.on('error', () => undefined);
-      c.end(true);
+      if (graceful && c.connected) c.end(false, { reasonCode: 0 });
+      else c.end(true);
     }
     this.setConnected(false);
   }

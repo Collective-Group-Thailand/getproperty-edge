@@ -1,19 +1,48 @@
 import { EventEmitter } from 'node:events';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { AddressInfo, Socket } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { createServer, type Server, type TLSSocket } from 'node:tls';
 
 import mqttPacket, { type IConnectPacket, type IPublishPacket, type Packet } from 'mqtt-packet';
+import { createWebSocketStream, WebSocketServer } from 'ws';
+
+/** Where a CONNECT came from: EMQX `ssl:default` 8883 (mTLS) or `ws:default` 8083 behind Caddy (D-239). */
+export type BrokerTransport = 'mtls' | 'ws';
+
+export interface ConnectContext {
+  transport: BrokerTransport;
+  /** Client certificate CN (mtls only; null on ws — TLS ends at the proxy). */
+  cn: string | null;
+  clientId: string;
+  username: string | undefined;
+  password: string | undefined;
+}
+
+/** Authn verdict: the identity the ACL applies to, or a CONNACK reason code (0x86 bad credentials, 0x87 not authorised). */
+export type AuthnResult = { identity: string } | { reasonCode: number };
 
 /**
- * In-process MQTT 5 broker for integration tests (no Docker/EMQX here): TLS with mandatory client
- * certificates (mTLS), the protocol §1 ACL derived from the certificate CN, QoS 0/1, retained
- * messages, LWT, PUBACK reason codes, and fault injection (kill/restart, lost PUBACKs).
+ * In-process MQTT 5 broker for integration tests (no Docker/EMQX here), shaped like the platform EMQX of device
+ * protocol 1.2 (D-235, D-244): TLS with mandatory client certificates (mTLS) on the main port, an optional WebSocket
+ * listener behind TLS without client certificates (`wss://…/mqtt`, D-239), a pluggable HTTP-authn stand-in
+ * (`authenticate`: username / password = device JWT), the exact 1.2 ACL, QoS 0/1, retained messages, LWT, PUBACK reason
+ * codes, and fault injection (kill/restart, lost PUBACKs).
  */
 export interface TestBrokerOptions {
   key: string;
   cert: string;
   ca: string;
   port?: number;
+  /**
+   * WebSocket listener (`wss://<host>:<wsPort>/mqtt`): TLS with this certificate, no client certificate requested — the
+   * platform's Caddy in front of EMQX ws 8083. Absent = no WebSocket listener.
+   */
+  ws?: { key: string; cert: string; port?: number };
+  /**
+   * The API's `POST /internal/emqx/authn` stand-in. Default: mtls → the certificate CN (no password check), ws → refused.
+   */
+  authenticate?: (ctx: ConnectContext) => AuthnResult;
   /**
    * What a denied PUBLISH gets: `puback` = PUBACK 0x87 (default), `disconnect` = the connection is closed like the
    * platform EMQX (`authorization.deny_action = disconnect`, D-230).
@@ -24,10 +53,13 @@ export interface TestBrokerOptions {
 }
 
 interface Conn {
-  socket: TLSSocket;
+  socket: Duplex;
+  /** The authenticated identity (the CN on mtls, the username on ws) — what the ACL is applied to. */
   cn: string;
+  transport: BrokerTransport;
   clientId: string;
   username: string | undefined;
+  password: string | undefined;
   subs: Set<string>;
   will: IConnectPacket['will'] | undefined;
   nextId: number;
@@ -45,18 +77,23 @@ export function topicMatches(filter: string, topic: string): boolean {
   return f.length === t.length;
 }
 
-/** Protocol §1 ACL: gateways publish only to `gp/v1/<id>/+` and, explicitly, `gp/v1/<id>/cmd/ack` (CR-006). */
+/** Protocol 1.2 ACL (D-244): gateways publish only to four explicit topics and subscribe only to config and cmd. */
 export function aclAllows(cn: string, action: 'publish' | 'subscribe', topic: string): boolean {
   if (cn === 'ingest' || cn === 'cloud') return true;
   const m = /^gw-([0-9a-f-]{36})$/.exec(cn);
   if (!m) return false;
   const gw = m[1];
-  if (action === 'publish') return topicMatches(`gp/v1/${gw}/+`, topic) || topic === `gp/v1/${gw}/cmd/ack`;
-  return topic === `gp/v1/${gw}/config` || topic === `gp/v1/${gw}/cmd`;
+  const allowed = action === 'publish' ? ['telemetry', 'health', 'events', 'cmd/ack'] : ['config', 'cmd'];
+  return allowed.some((s) => topic === `gp/v1/${gw}/${s}`);
 }
+
+const SERVICE_IDENTITY = /^gw-[0-9a-f-]{36}$|^ingest$|^cloud$/;
 
 export class TestBroker extends EventEmitter {
   private server: Server | undefined;
+  private wsHttps: HttpsServer | undefined;
+  private wss: WebSocketServer | undefined;
+  wsPort = 0;
   private readonly conns = new Set<Conn>();
   private readonly sockets = new Set<Socket>();
   readonly retained = new Map<string, Buffer>();
@@ -66,7 +103,18 @@ export class TestBroker extends EventEmitter {
   /** Only PUBACKs of topics matching this are dropped. */
   dropPubackTopic: RegExp = /./;
   random: () => number = Math.random;
-  readonly stats = { connects: 0, publishes: 0, pubacks: 0, denied: 0, droppedPubacks: 0, wills: 0 };
+  readonly stats = {
+    connects: 0,
+    wsConnects: 0,
+    authDenied: 0,
+    publishes: 0,
+    pubacks: 0,
+    denied: 0,
+    droppedPubacks: 0,
+    wills: 0,
+  };
+  /** Every CONNECT seen, accepted or not (password included — tests only). */
+  readonly connectLog: Array<ConnectContext & { accepted: boolean; peerCert: boolean }> = [];
 
   constructor(private readonly o: TestBrokerOptions) {
     super();
@@ -91,16 +139,55 @@ export class TestBroker extends EventEmitter {
     });
     await new Promise<void>((resolve) => this.server!.listen(this.o.port ?? this.port ?? 0, '127.0.0.1', resolve));
     this.port = (this.server.address() as AddressInfo).port;
+    if (this.o.ws) await this.startWs(this.o.ws);
     return this.port;
   }
 
-  /** Simulates a broker crash: every connection is cut (no DISCONNECT) and the port closed. */
+  /** Caddy-like WSS front: TLS (no client certificate requested) + WebSocket upgrade on `/mqtt`, subprotocol `mqtt`. */
+  private async startWs(o: NonNullable<TestBrokerOptions['ws']>): Promise<void> {
+    this.wsHttps = createHttpsServer({ key: o.key, cert: o.cert, requestCert: false, minVersion: 'TLSv1.2' }, (_q, r) =>
+      r.writeHead(404).end(),
+    );
+    this.wsHttps.on('tlsClientError', () => this.emit('tlsReject'));
+    this.wsHttps.on('connection', (s: Socket) => {
+      this.sockets.add(s);
+      s.on('close', () => this.sockets.delete(s));
+    });
+    this.wss = new WebSocketServer({
+      server: this.wsHttps,
+      path: '/mqtt',
+      handleProtocols: (protocols) => (protocols.has('mqtt') ? 'mqtt' : false),
+    });
+    this.wss.on('connection', (ws, req) => {
+      const peer = (req.socket as TLSSocket).getPeerCertificate?.();
+      const stream = createWebSocketStream(ws);
+      this.onStream(stream, 'ws', null, !!peer && Object.keys(peer).length > 0);
+    });
+    await new Promise<void>((resolve) =>
+      this.wsHttps!.listen(o.port ?? (this.wsPort || 0), '127.0.0.1', () => resolve()),
+    );
+    this.wsPort = (this.wsHttps.address() as AddressInfo).port;
+  }
+
+  /** Simulates a broker crash: every connection is cut (no DISCONNECT) and the ports closed. */
   async kill(): Promise<void> {
     const srv = this.server;
+    const https = this.wsHttps;
+    const wss = this.wss;
     this.server = undefined;
+    this.wsHttps = undefined;
+    this.wss = undefined;
     for (const s of this.sockets) s.destroy();
+    for (const c of this.conns) c.socket.destroy();
     this.conns.clear();
+    if (wss) await new Promise<void>((r) => wss.close(() => r()));
+    if (https) await new Promise<void>((r) => https.close(() => r()));
     if (srv) await new Promise<void>((r) => srv.close(() => r()));
+  }
+
+  /** Disconnects every session of this identity (e.g. the platform admin switched its WebSocket fallback off). */
+  kick(identity: string): void {
+    for (const c of this.conns) if (c.cn === identity) c.socket.destroy();
   }
 
   async restart(): Promise<void> {
@@ -113,8 +200,13 @@ export class TestBroker extends EventEmitter {
   }
 
   /** CONNECT identities as sent by the clients (EMQX on the platform takes the username and client id from the CN). */
-  sessions(): Array<{ cn: string; clientId: string; username: string | undefined }> {
-    return [...this.conns].map((c) => ({ cn: c.cn, clientId: c.clientId, username: c.username }));
+  sessions(): Array<{ cn: string; clientId: string; username: string | undefined; transport: BrokerTransport }> {
+    return [...this.conns].map((c) => ({
+      cn: c.cn,
+      clientId: c.clientId,
+      username: c.username,
+      transport: c.transport,
+    }));
   }
 
   /** Publishes from the cloud side (config, commands). */
@@ -130,7 +222,8 @@ export class TestBroker extends EventEmitter {
   }
 
   private send(c: Conn, p: Packet): void {
-    if (!c.socket.destroyed) c.socket.write(mqttPacket.generate(p, { protocolVersion: 5 }));
+    if (c.socket.destroyed || !c.socket.writable) return;
+    c.socket.write(mqttPacket.generate(p, { protocolVersion: 5 }));
   }
 
   private deliver(c: Conn, topic: string, payload: Buffer, qos: 0 | 1, retain: boolean): void {
@@ -145,24 +238,43 @@ export class TestBroker extends EventEmitter {
   private onSocket(socket: TLSSocket): void {
     const peer = socket.getPeerCertificate();
     const cn = typeof peer.subject?.CN === 'string' ? peer.subject.CN : '';
+    this.onStream(socket, 'mtls', cn, true);
+  }
+
+  private authenticate(ctx: ConnectContext): AuthnResult {
+    if (this.o.authenticate) return this.o.authenticate(ctx);
+    if (ctx.transport === 'ws' || !ctx.cn || !SERVICE_IDENTITY.test(ctx.cn)) return { reasonCode: 0x87 };
+    return { identity: ctx.cn };
+  }
+
+  private onStream(socket: Duplex, transport: BrokerTransport, cn: string | null, peerCert: boolean): void {
     const parser = mqttPacket.parser({ protocolVersion: 5 });
     let conn: Conn | undefined;
+    const refuse = (reasonCode: number) => {
+      socket.write(mqttPacket.generate({ cmd: 'connack', reasonCode, sessionPresent: false }, { protocolVersion: 5 }));
+      socket.end();
+      setTimeout(() => socket.destroy(), 50).unref();
+    };
     parser.on('packet', (packet: Packet) => {
       if (!conn) {
         if (packet.cmd !== 'connect') return socket.destroy();
         const cp = packet;
-        if (!/^gw-[0-9a-f-]{36}$|^ingest$|^cloud$/.test(cn)) {
-          socket.write(
-            mqttPacket.generate({ cmd: 'connack', reasonCode: 0x87, sessionPresent: false }, { protocolVersion: 5 }),
-          );
-          return socket.destroy();
+        const password = cp.password === undefined ? undefined : Buffer.from(cp.password).toString();
+        const ctx: ConnectContext = { transport, cn, clientId: cp.clientId, username: cp.username, password };
+        const verdict = this.authenticate(ctx);
+        this.connectLog.push({ ...ctx, accepted: 'identity' in verdict, peerCert });
+        if (!('identity' in verdict)) {
+          this.stats.authDenied++;
+          return refuse(verdict.reasonCode);
         }
         for (const other of this.conns) if (other.clientId === cp.clientId) other.socket.destroy();
         conn = {
           socket,
-          cn,
+          cn: verdict.identity,
+          transport,
           clientId: cp.clientId,
           username: cp.username,
+          password,
           subs: new Set(),
           will: cp.will,
           nextId: 0,
@@ -170,8 +282,9 @@ export class TestBroker extends EventEmitter {
         };
         this.conns.add(conn);
         this.stats.connects++;
+        if (transport === 'ws') this.stats.wsConnects++;
         this.send(conn, { cmd: 'connack', reasonCode: 0, sessionPresent: false });
-        this.emit('clientConnected', cn);
+        this.emit('clientConnected', conn.cn);
         return;
       }
       this.onPacket(conn, packet);
@@ -197,7 +310,9 @@ export class TestBroker extends EventEmitter {
       case 'publish': {
         this.stats.publishes++;
         const payload = Buffer.isBuffer(packet.payload) ? packet.payload : Buffer.from(packet.payload);
-        if (!aclAllows(c.cn, 'publish', packet.topic)) {
+        // 1.2 (D-244): a gateway publishes QoS ≤ 1 and never retained, else denied like a foreign topic
+        const gwRules = !/^gw-/.test(c.cn) || (!packet.retain && packet.qos <= 1);
+        if (!gwRules || !aclAllows(c.cn, 'publish', packet.topic)) {
           this.stats.denied++;
           if (this.o.denyAction === 'disconnect') {
             this.send(c, { cmd: 'disconnect', reasonCode: 0x87 });

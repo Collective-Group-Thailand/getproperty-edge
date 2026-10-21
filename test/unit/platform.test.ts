@@ -6,7 +6,7 @@ import { assertSecureBrokerUrl, MqttLink } from '../../src/transport/mqtt/mqtt-l
 import { silentLogger } from '../../src/util/logger.js';
 
 /** D-230: the cloud side runs on Collective's shared AWS platform (Caddy DEVICE_HOST + EMQX mTLS on 8883). */
-describe('platform endpoints (D-230, O-012)', () => {
+describe('platform endpoints (D-230, D-239)', () => {
   it('defaults to the device host and keeps the WSS fallback off', () => {
     const env = loadEnv({});
     expect(env.apiBaseUrl).toBe(DEFAULT_DEVICE_API_URL);
@@ -36,7 +36,12 @@ describe('platform endpoints (D-230, O-012)', () => {
   });
 
   it('an MQTT link never accepts a plaintext primary or WSS URL', () => {
-    const base = { gatewayId: 'g', credentials: () => ({ key: '', cert: '', ca: '' }), logger: silentLogger() };
+    const base = {
+      gatewayId: 'g',
+      credentials: () => ({ key: '', cert: '', ca: '' }),
+      password: () => Promise.reject(new Error('unused')),
+      logger: silentLogger(),
+    };
     expect(() => new MqttLink({ ...base, url: 'mqtt://mqtt.getproperty.co:1883' })).toThrow(/non-TLS/);
     expect(() => new MqttLink({ ...base, url: 'mqtts://mqtt.getproperty.co:8883', wsUrl: 'ws://x/mqtt' })).toThrow(
       /non-TLS/,

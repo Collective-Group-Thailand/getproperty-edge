@@ -2,6 +2,8 @@
 # getproperty-edge installer — run as root on the gateway (Debian/Raspberry Pi OS, arm64).
 #
 #   sudo ./install.sh --binary ./getproperty-edge-0.1.0-linux-arm64 [--api-url https://device.getproperty.co]
+#                     [--mqtt-ws-fallback on|off]   (on: only where the building blocks 8883 AND the platform
+#                                                    admin enabled this gateway's WebSocket fallback, D-239)
 #
 # Creates the service user, directories and permissions, installs the binary into A/B slot "a",
 # the OTA guard, the systemd unit, udev rules (RS485 adapters, GPIO, LEDs), NTP and the hardware
@@ -20,12 +22,15 @@ NO_SYSTEMD=0
 SVC_USER="gpedge"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-usage() { sed -n '2,12p' "$0"; exit "${1:-0}"; }
+MQTT_WS_FALLBACK="off"
+
+usage() { sed -n '2,14p' "$0"; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --binary) BINARY="$2"; shift 2 ;;
     --api-url) API_URL="$2"; shift 2 ;;
     --tz) TZ_NAME="$2"; shift 2 ;;
+    --mqtt-ws-fallback) MQTT_WS_FALLBACK="$2"; shift 2 ;;
     --root) ROOT="$2"; NO_SYSTEMD=1; shift 2 ;;
     --no-systemd) NO_SYSTEMD=1; shift ;;
     -h | --help) usage 0 ;;
@@ -35,6 +40,7 @@ done
 
 [ -n "$BINARY" ] && [ -f "$BINARY" ] || { echo "--binary <file> is required" >&2; exit 1; }
 case "$API_URL" in https://*) ;; *) echo "--api-url must be https://" >&2; exit 1 ;; esac
+case "$MQTT_WS_FALLBACK" in on | off) ;; *) echo "--mqtt-ws-fallback must be on | off" >&2; exit 1 ;; esac
 if [ -z "$ROOT" ] && [ "$(id -u)" -ne 0 ]; then echo "run as root (or use --root for a test install)" >&2; exit 1; fi
 
 OPT="$ROOT/opt/getproperty-edge"
@@ -85,8 +91,9 @@ cat > "$ETC/agent.env" << CONF
 # getproperty-edge — non-secret settings; meters and buses come from the cloud config
 # device host (bootstrap, token, renewal, readings fallback); the broker URL comes with the bootstrap answer
 GP_API_URL=$API_URL
-# MQTT 5 + mTLS on outbound TCP 8883 only — WSS on 443 is not available yet (O-012); keep off
-GP_MQTT_WS_FALLBACK=off
+# MQTT 5 + mTLS + device JWT on outbound TCP 8883 (protocol 1.2). on = also allow the WebSocket fallback on 443
+# (device JWT only, no client certificate, D-239) — used only if the platform admin enabled it for this gateway
+GP_MQTT_WS_FALLBACK=$MQTT_WS_FALLBACK
 GP_TZ=$TZ_NAME
 GP_DRIVER_MODE=hardware
 GP_STATUS_PORT=8080

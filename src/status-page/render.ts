@@ -6,7 +6,14 @@ export interface StatusView {
   provisioning: 'provisioned' | 'waiting_for_code' | 'bootstrapping' | 'rejected';
   provisioningDetail?: string;
   configVersion: number;
-  link: { broker: 'connected' | 'disconnected'; type: string; rssi: number | null; httpsFallback: boolean };
+  link: {
+    broker: 'connected' | 'disconnected';
+    /** `mtls` = 8883 with the client certificate; `wss` = the WebSocket fallback (device JWT only, D-239). */
+    transport?: 'mtls' | 'wss';
+    type: string;
+    rssi: number | null;
+    httpsFallback: boolean;
+  };
   queue: { depth: number; oldestReadAt: string | null; evictedTotal: number };
   uptimeS: number;
   now: string;
@@ -78,7 +85,7 @@ ${provisioningForm}
 <dt>Gateway id</dt><dd>${esc(v.gatewayId ?? 'not provisioned')}</dd>
 <dt>Agent version</dt><dd>${esc(v.agentVersion)}</dd>
 <dt>Config version</dt><dd>${esc(v.configVersion || '—')}</dd>
-<dt>Broker</dt><dd class="${v.link.broker === 'connected' ? 'ok' : 'bad'}">${esc(v.link.broker)}${v.link.httpsFallback ? ' (HTTPS fallback active)' : ''}</dd>
+<dt>Broker</dt><dd class="${v.link.broker === 'connected' ? 'ok' : 'bad'}">${esc(v.link.broker)}${v.link.transport === 'wss' ? ' (WebSocket fallback)' : ''}${v.link.httpsFallback ? ' (HTTPS fallback active)' : ''}</dd>
 <dt>Link</dt><dd>${esc(v.link.type)}${v.link.rssi !== null ? ` · ${esc(v.link.rssi)} dBm` : ''}</dd>
 <dt>Queue</dt><dd>${esc(v.queue.depth)} buffered${v.queue.oldestReadAt ? ` · oldest ${esc(v.queue.oldestReadAt)}` : ''}${v.queue.evictedTotal ? ` · ${esc(v.queue.evictedTotal)} evicted` : ''}</dd>
 <dt>Uptime</dt><dd>${esc(Math.floor(v.uptimeS / 3600))} h ${esc(Math.floor((v.uptimeS % 3600) / 60))} min</dd>

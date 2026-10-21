@@ -10,7 +10,7 @@ import { silentLogger } from '../src/util/logger.js';
 import { ApiStub } from './api-stub.js';
 import { IngestStub } from './ingest-stub.js';
 import { createTestCa, issueBrokerCert, issueClientCert, issueServerCert, type TestCa } from './pki.js';
-import { TestBroker } from './test-broker.js';
+import { type AuthnResult, type ConnectContext, TestBroker } from './test-broker.js';
 
 export interface TestbedOptions {
   keepReadings?: boolean;
@@ -20,8 +20,16 @@ export interface TestbedOptions {
    * device host. Unset = `mqtts://127.0.0.1:<port>` with a localhost/127.0.0.1 certificate.
    */
   mqttHost?: string;
-  /** `mqtt.wsUrl` in the bootstrap answer (the real api: only when MQTT_PUBLIC_WS_URL is set, D-231). */
+  /**
+   * `MQTT_PUBLIC_WS_URL` of the API stub, handed to gateways whose fallback is on (`agent({ wsFallback: true })`).
+   * Overrides the URL of the testbed's own WebSocket listener (`ws`).
+   */
   mqttWsUrl?: string;
+  /**
+   * Run the broker's WebSocket listener (`wss://<mqttHost>:<port>/mqtt`, D-239). `foreign` = its certificate comes from
+   * another CA than the bootstrap's (a TLS-terminating proxy with a public certificate) — must fail closed.
+   */
+  ws?: boolean | 'foreign';
   denyAction?: 'puback' | 'disconnect';
 }
 
@@ -36,6 +44,8 @@ export const loopbackLookup: LookupFunction = (_host, options, cb) => {
 
 /** Broker + API stub + ingest on a throwaway CA: the cloud side for integration tests and dev:local. */
 export class Testbed {
+  /** Platform setting `mqtt.authn.require_device_jwt` (on by default, D-244). */
+  requireDeviceJwt = true;
   ca!: TestCa;
   broker!: TestBroker;
   api!: ApiStub;
@@ -52,23 +62,56 @@ export class Testbed {
     const broker = this.opts.mqttHost
       ? await issueBrokerCert(this.ca, this.opts.mqttHost).then((b) => ({ keyPem: b.keyPem, certPem: b.chainPem }))
       : server;
+    let ws: { key: string; cert: string } | undefined;
+    if (this.opts.ws) {
+      const host = this.opts.mqttHost ?? '127.0.0.1';
+      const issuer = this.opts.ws === 'foreign' ? await createTestCa('some public CA') : this.ca;
+      ws = this.opts.mqttHost
+        ? await issueBrokerCert(issuer, host).then((c) => ({ key: c.keyPem, cert: c.chainPem }))
+        : await issueServerCert(issuer).then((c) => ({ key: c.keyPem, cert: c.certPem }));
+    }
     this.broker = new TestBroker({
       key: broker.keyPem,
       cert: broker.certPem,
       ca: this.ca.certPem,
+      ...(ws ? { ws } : {}),
       ...(this.opts.denyAction ? { denyAction: this.opts.denyAction } : {}),
+      authenticate: (ctx) => this.authenticate(ctx),
       onPublish: (cn, topic, payload) => this.ingest.handle(cn, topic, payload),
     });
     const port = await this.broker.start();
+    const wsUrl =
+      this.opts.mqttWsUrl ?? (ws ? `wss://${this.opts.mqttHost ?? '127.0.0.1'}:${this.broker.wsPort}/mqtt` : undefined);
     this.api = new ApiStub({
       ca: this.ca,
       server,
       mqttUrl: `mqtts://${this.opts.mqttHost ?? '127.0.0.1'}:${port}`,
-      ...(this.opts.mqttWsUrl ? { mqttWsUrl: this.opts.mqttWsUrl } : {}),
+      ...(wsUrl ? { mqttWsUrl: wsUrl } : {}),
       ingest: this.ingest,
     });
     await this.api.start();
     return this;
+  }
+
+  /**
+   * The API's EMQX HTTP authn (D-244, device protocol 1.2): `mtls` → CN `gw-<id>` = username = client id and that
+   * gateway's own device JWT as password (may be absent only with `requireDeviceJwt` off); `ws` → only with the
+   * gateway's fallback on, always with its JWT. Internal service users (`ingest`, `cloud`) by certificate.
+   */
+  authenticate(ctx: ConnectContext): AuthnResult {
+    const gwRe = /^gw-([0-9a-f-]{36})$/;
+    if (ctx.transport === 'mtls') {
+      if (ctx.cn === 'ingest' || ctx.cn === 'cloud') return { identity: ctx.cn };
+      const m = ctx.cn ? gwRe.exec(ctx.cn) : null;
+      if (!m || ctx.username !== ctx.cn || ctx.clientId !== ctx.cn) return { reasonCode: 0x87 };
+      if (this.api.retired.has(m[1]!)) return { reasonCode: 0x87 };
+      if (ctx.password === undefined) return this.requireDeviceJwt ? { reasonCode: 0x86 } : { identity: ctx.cn };
+      return this.api.verifyToken(ctx.password) === m[1] ? { identity: ctx.cn } : { reasonCode: 0x86 };
+    }
+    const m = ctx.username ? gwRe.exec(ctx.username) : null;
+    if (!m || ctx.clientId !== ctx.username) return { reasonCode: 0x87 };
+    if (!this.api.wsFallback.has(m[1]!)) return { reasonCode: 0x87 };
+    return this.api.verifyToken(ctx.password) === m[1] ? { identity: ctx.username } : { reasonCode: 0x86 };
   }
 
   async stop(): Promise<void> {
@@ -112,13 +155,15 @@ export class Testbed {
   }
 
   /** An agent provisioned against this testbed (code registered with the API stub). */
-  agent(over: Omit<Partial<AgentDeps>, 'env'> & { env?: Partial<AgentEnv>; code?: string } = {}): {
+  agent(
+    over: Omit<Partial<AgentDeps>, 'env'> & { env?: Partial<AgentEnv>; code?: string; wsFallback?: boolean } = {},
+  ): {
     agent: Agent;
     gatewayId: string;
   } {
     const code = over.code ?? `TEST-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
-    const gatewayId = this.api.addCode(code);
-    const { env: envOver, code: _c, ...rest } = over;
+    const gatewayId = this.api.addCode(code, undefined, { wsFallback: !!over.wsFallback });
+    const { env: envOver, code: _c, wsFallback: _w, mqtt: mqttOver, ...rest } = over;
     const agent = new Agent({
       logger: silentLogger(),
       jitterMaxMs: 0,
@@ -128,6 +173,7 @@ export class Testbed {
         backoffMaxMs: 300,
         connectTimeoutMs: 3000,
         ...(this.opts.mqttHost ? { lookup: loopbackLookup } : {}),
+        ...mqttOver,
       },
       forwarder: { retryBaseMs: 50, retryMaxMs: 300 },
       ...rest,

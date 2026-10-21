@@ -5,10 +5,18 @@ import { writeFileAtomic } from '../util/fs-atomic.js';
 import type { Logger } from '../util/logger.js';
 import { certMatchesKey, parseCert } from './csr.js';
 
+/** Topic suffixes below `gp/v1/<gatewayId>/` the broker lets this gateway use (bootstrap `mqtt.acl`, protocol 1.2). */
+export interface MqttAcl {
+  publish: string[];
+  subscribe: string[];
+}
+
 export interface Identity {
   gatewayId: string;
   mqttUrl: string;
   mqttWsUrl?: string;
+  /** Absent for identities bootstrapped before protocol 1.2: the contract's `x-acl` applies. */
+  mqttAcl?: MqttAcl;
   certPem: string;
   keyPem: string;
   caPem: string;
@@ -20,6 +28,7 @@ interface IdentityMeta {
   gatewayId: string;
   mqttUrl: string;
   mqttWsUrl?: string;
+  mqttAcl?: MqttAcl;
 }
 
 /**
@@ -52,6 +61,9 @@ export class IdentityStore {
     const caPem = readFileSync(this.path('ca.pem'), 'utf8');
     if (!certMatchesKey(certPem, keyPem)) throw new Error('device certificate does not match the device key');
     const info = parseCert(certPem);
+    // protocol 1.2: the MQTT username / client id is `gw-<gatewayId>` and must equal the certificate CN on 8883
+    if (info.subjectCn !== `gw-${meta.gatewayId}`)
+      throw new Error(`stored certificate CN ${info.subjectCn ?? '(none)'} is not gw-${meta.gatewayId}`);
     this.cached = { ...meta, certPem, keyPem, caPem, notBefore: info.notBefore, notAfter: info.notAfter };
     return this.cached;
   }
@@ -70,6 +82,7 @@ export class IdentityStore {
     writeFileAtomic(this.path('ca.pem'), id.caPem, 0o600);
     const meta: IdentityMeta = { gatewayId: id.gatewayId, mqttUrl: id.mqttUrl };
     if (id.mqttWsUrl) meta.mqttWsUrl = id.mqttWsUrl;
+    if (id.mqttAcl) meta.mqttAcl = id.mqttAcl;
     writeFileAtomic(this.path('identity.json'), JSON.stringify(meta, null, 2) + '\n', 0o600);
     this.cached = { ...id, notBefore: info.notBefore, notAfter: info.notAfter };
     return this.cached;

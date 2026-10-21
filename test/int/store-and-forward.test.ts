@@ -167,9 +167,12 @@ describe('E1.1 acceptance — store-and-forward over MQTT 5 + mTLS', () => {
     const { agent, gatewayId } = tb.agent();
     await agent.start();
     const creds = agent.identityStore.credentials()!;
+    await agent.stop(); // the probe logs in as the gateway itself (protocol 1.2: client id = username = CN)
     const c = await mqtt.connectAsync(`mqtts://127.0.0.1:${tb.broker.port}`, {
       protocolVersion: 5,
-      clientId: 'probe',
+      clientId: `gw-${gatewayId}`,
+      username: `gw-${gatewayId}`,
+      password: tb.api.issueToken(gatewayId).accessToken,
       key: creds.key,
       cert: creds.cert,
       ca: creds.ca,
@@ -184,7 +187,6 @@ describe('E1.1 acceptance — store-and-forward over MQTT 5 + mTLS', () => {
     const own = await c.subscribeAsync(`gp/v1/${gatewayId}/config`, { qos: 1 });
     expect(own[0]!.qos).toBe(1);
     await c.endAsync();
-    await agent.stop();
   });
 });
 

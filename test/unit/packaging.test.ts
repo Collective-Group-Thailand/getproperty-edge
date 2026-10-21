@@ -25,6 +25,7 @@ describe('scripts/install.sh (test mode under --root)', () => {
     expect(statSync(join(root, 'var/lib/getproperty-edge')).mode & 0o777).toBe(0o700);
     const env = readFileSync(join(root, 'etc/getproperty-edge/agent.env'), 'utf8');
     expect(env).toContain('GP_API_URL=https://api.example.test');
+    expect(env).toContain('GP_MQTT_WS_FALLBACK=off'); // D-239: opt-in per gateway (--mqtt-ws-fallback on)
     expect(env).not.toMatch(/PROVISIONING|KEY|TOKEN|SECRET/);
     expect(statSync(join(root, 'etc/getproperty-edge/agent.env')).mode & 0o777).toBe(0o640);
     expect(readFileSync(join(root, 'etc/udev/rules.d/60-getproperty-edge.rules'), 'utf8')).toMatch(
@@ -46,8 +47,11 @@ describe('scripts/install.sh (test mode under --root)', () => {
       bin,
       '--api-url',
       'https://api.example.test',
+      '--mqtt-ws-fallback',
+      'on',
     ]);
     expect(readlinkSync(join(opt, 'slots/current'))).toBe('a');
+    expect(readFileSync(join(root, 'etc/getproperty-edge/agent.env'), 'utf8')).toContain('GP_MQTT_WS_FALLBACK=on');
   });
 
   it('refuses plain-HTTP API URLs and missing binaries', () => {
@@ -60,6 +64,13 @@ describe('scripts/install.sh (test mode under --root)', () => {
       execFileSync(
         'bash',
         ['scripts/install.sh', '--root', root, '--binary', join(root, 'b'), '--api-url', 'http://x'],
+        { stdio: 'pipe' },
+      ),
+    ).toThrow();
+    expect(() =>
+      execFileSync(
+        'bash',
+        ['scripts/install.sh', '--root', root, '--binary', join(root, 'b'), '--mqtt-ws-fallback', 'maybe'],
         { stdio: 'pipe' },
       ),
     ).toThrow();

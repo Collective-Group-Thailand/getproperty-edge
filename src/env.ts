@@ -21,8 +21,9 @@ export interface AgentEnv {
   mqttUrlOverride: string | undefined;
   mqttServername: string | undefined;
   /**
-   * Use the bootstrap's `mqtt.wsUrl` (WSS on 443) after repeated 8883 failures. Off by default: the R1 platform has no
-   * mutually-authenticated WSS endpoint yet (O-012); the HTTPS readings fallback over the device host covers outages.
+   * `GP_MQTT_WS_FALLBACK`: allow the WebSocket fallback `wss://<MQTT_HOST>/mqtt` after repeated 8883 failures (D-239,
+   * O-012 resolved). Off by default; effective only when the bootstrap answer carried `mqtt.wsUrl` (the platform admin
+   * enabled the fallback for this gateway). On that path the device JWT is the only credential (no client certificate).
    */
   mqttWsFallback: boolean;
   httpsFallbackAfterS: number;

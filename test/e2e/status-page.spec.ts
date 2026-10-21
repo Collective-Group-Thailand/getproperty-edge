@@ -12,7 +12,7 @@ let agent: Agent;
 let base = '';
 let gatewayId = '';
 const CODE = 'GP7K-Q2MX-9TZ4';
-const SECRETS = ['PRIVATE KEY', 'BEGIN CERTIFICATE', CODE, 'tok-'];
+const SECRETS = ['PRIVATE KEY', 'BEGIN CERTIFICATE', CODE, 'eyJ'];
 
 test.beforeAll(async () => {
   tb = await new Testbed().start();
