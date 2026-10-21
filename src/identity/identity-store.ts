@@ -88,6 +88,22 @@ export class IdentityStore {
     return this.cached;
   }
 
+  /**
+   * Stores the WebSocket fallback URL announced by a token refresh (CR-015, api D-249): `undefined` removes it. Only
+   * `identity.json` is rewritten (atomically, 0600); certificate and key are untouched. Returns the updated identity.
+   */
+  setMqttWsUrl(wsUrl: string | undefined): Identity {
+    const id = this.load();
+    if (!id) throw new Error('no identity to update');
+    const meta: IdentityMeta = { gatewayId: id.gatewayId, mqttUrl: id.mqttUrl };
+    if (wsUrl) meta.mqttWsUrl = wsUrl;
+    if (id.mqttAcl) meta.mqttAcl = id.mqttAcl;
+    writeFileAtomic(this.path('identity.json'), JSON.stringify(meta, null, 2) + '\n', 0o600);
+    const { mqttWsUrl: _old, ...rest } = id;
+    this.cached = wsUrl ? { ...rest, mqttWsUrl: wsUrl } : rest;
+    return this.cached;
+  }
+
   credentials(): { key: string; cert: string; ca: string } | undefined {
     const id = this.load();
     return id ? { key: id.keyPem, cert: id.certPem, ca: id.caPem } : undefined;

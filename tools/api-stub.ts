@@ -67,6 +67,16 @@ export class ApiStub {
     return gatewayId;
   }
 
+  /**
+   * `mqtt { url, wsUrl? }` as the API computes it (`mqttEndpointOf`, D-239 / D-249): `wsUrl` only while the gateway's
+   * fallback is on and `MQTT_PUBLIC_WS_URL` is set. Shared by the bootstrap and the token answers.
+   */
+  mqttEndpoints(gatewayId: string): { url: string; wsUrl?: string } {
+    return this.o.mqttWsUrl && this.wsFallback.has(gatewayId)
+      ? { url: this.o.mqttUrl, wsUrl: this.o.mqttWsUrl }
+      : { url: this.o.mqttUrl };
+  }
+
   /** A device JWT (HS256, `aud=device`, `sub` = gatewayId) like `POST /v1/device/token`. */
   issueToken(gatewayId: string): { accessToken: string; expiresAt: string } {
     const exp = Date.now() + this.tokenTtlMs;
@@ -159,8 +169,7 @@ export class ApiStub {
           certificatePem,
           caChainPem: this.o.ca.certPem,
           mqtt: {
-            url: this.o.mqttUrl,
-            ...(this.o.mqttWsUrl && this.wsFallback.has(gw) ? { wsUrl: this.o.mqttWsUrl } : {}),
+            ...this.mqttEndpoints(gw),
             clientId: login,
             username: login,
             password: 'device_jwt',
@@ -184,7 +193,8 @@ export class ApiStub {
         }
         const gw = cn!.replace(/^gw-/, '');
         if (this.retired.has(gw)) return this.problem(res, 401, 'auth.unauthenticated');
-        return this.json(res, 200, this.issueToken(gw));
+        // api D-249 (CR-015): the current MQTT endpoints of this gateway with every token
+        return this.json(res, 200, { ...this.issueToken(gw), mqtt: this.mqttEndpoints(gw) });
       }
       if (req.method === 'POST' && url.pathname === '/v1/device/certificate/renew') {
         const b = JSON.parse(body.toString()) as { csrPem: string };

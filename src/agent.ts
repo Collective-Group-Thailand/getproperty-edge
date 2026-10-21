@@ -20,7 +20,7 @@ import { ensureIdentity, ProvisioningCodeSource } from './identity/bootstrap.js'
 import type { Identity } from './identity/identity-store.js';
 import { IdentityStore } from './identity/identity-store.js';
 import { CertificateRenewer } from './identity/renewal.js';
-import { DeviceTokenCache } from './identity/token.js';
+import { DeviceTokenCache, type MqttEndpoints } from './identity/token.js';
 import { NodeOtaFs, type OtaFs } from './ota/ota-fs.js';
 import { AbSlots } from './ota/slots.js';
 import { bakedOtaKeys } from './ota/trusted-keys.js';
@@ -38,7 +38,7 @@ import { type Db, KvStore, openDb } from './storage/db.js';
 import { Forwarder } from './transport/forwarder.js';
 import { DeviceApi, deviceRoute } from './transport/https/device-api.js';
 import type { Link } from './transport/link.js';
-import { MqttLink } from './transport/mqtt/mqtt-link.js';
+import { assertSecureBrokerUrl, MqttLink } from './transport/mqtt/mqtt-link.js';
 import { type Clock, systemClock } from './util/clock.js';
 import { formatMilli } from './util/decimal.js';
 import type { Logger, LogRing } from './util/logger.js';
@@ -47,8 +47,9 @@ import { AGENT_VERSION } from './version.js';
 
 /**
  * The WebSocket fallback URL the link may use (D-239, O-012 resolved): only when the API enabled it for this gateway
- * (bootstrap `mqtt.wsUrl`, set by the platform admin per gateway) **and** the gateway's own `GP_MQTT_WS_FALLBACK=on`
- * (api deployment §5 step 3). Never derived from the 8883 URL, never without the bootstrap's answer.
+ * (`mqtt.wsUrl` of the bootstrap answer or of a later token refresh — CR-015, api D-249 — set by the platform admin per
+ * gateway) **and** the gateway's own `GP_MQTT_WS_FALLBACK=on` (api deployment §5 step 3). Never derived from the 8883
+ * URL, never without the API's answer.
  */
 export function wsFallbackUrl(id: Identity, env: AgentEnv, logger: Logger): string | undefined {
   if (id.mqttWsUrl && env.mqttWsFallback) {
@@ -65,7 +66,7 @@ export function wsFallbackUrl(id: Identity, env: AgentEnv, logger: Logger): stri
     );
   else if (env.mqttWsFallback)
     logger.warn(
-      'mqtt: GP_MQTT_WS_FALLBACK=on but the platform has not enabled the fallback for this gateway (no mqtt.wsUrl in the bootstrap answer) — 8883 only; re-provision after the platform admin enabled it',
+      'mqtt: GP_MQTT_WS_FALLBACK=on but the platform has not enabled the fallback for this gateway (no mqtt.wsUrl from the API) — 8883 only; picked up at the next token refresh once the platform admin enables it',
     );
   return undefined;
 }
@@ -142,6 +143,7 @@ export class Agent {
   private readonly uncleanStart: boolean;
   private readonly lastRegister = new Map<string, string>();
   private stopped = false;
+  private announcedUrlWarned: string | undefined;
 
   constructor(private readonly d: AgentDeps) {
     const env = d.env;
@@ -172,6 +174,7 @@ export class Agent {
       logger: d.logger,
     });
     this.tokens = new DeviceTokenCache(this.api, this.clock);
+    this.tokens.onMqttEndpoints((m) => this.applyMqttEndpoints(m));
     this.metrics = new SystemMetrics(d.host ?? realHost, env.stateDir);
     this.led = d.led ?? (env.ledName ? new SysfsLed(env.ledName) : new SimLed());
     this.statuses = new MeterStatusTracker(3, (meterId, status, failures) =>
@@ -257,6 +260,55 @@ export class Agent {
     writeFileSync(file, `${token}\n`, { mode: 0o600 });
     this.d.logger.warn({ file }, 'status page listens on the LAN: local admin token written (show it with sudo cat)');
     return token;
+  }
+
+  /**
+   * CR-015 (api D-249): the MQTT endpoints announced by a token refresh. A changed WebSocket fallback URL (added or
+   * removed by the platform admin) is stored in `identity.json` and handed to the link for its next connect — still
+   * gated by `GP_MQTT_WS_FALLBACK=on` (`wsFallbackUrl`) and verified against the bootstrap CA by the link (fail
+   * closed). A non-TLS URL is refused and the stored one kept. The 8883 URL is **not** moved by a token answer
+   * (re-provision to move the broker); a different one is only logged.
+   */
+  applyMqttEndpoints(m: MqttEndpoints): void {
+    const id = this.identityStore.load();
+    if (!id) return;
+    const log = this.d.logger;
+    if (m.url !== id.mqttUrl && m.url !== this.announcedUrlWarned) {
+      this.announcedUrlWarned = m.url;
+      log.warn(
+        { announced: m.url, stored: id.mqttUrl },
+        'mqtt: the API announces another 8883 URL — not applied (only the WebSocket fallback follows token refreshes)',
+      );
+    }
+    if (m.wsUrl === id.mqttWsUrl) return;
+    try {
+      if (m.wsUrl) assertSecureBrokerUrl(m.wsUrl);
+    } catch (err) {
+      log.error(
+        { err: (err as Error).message },
+        'mqtt: refusing the WebSocket fallback URL announced by the API — keeping the stored endpoints',
+      );
+      return;
+    }
+    let updated: Identity;
+    try {
+      updated = this.identityStore.setMqttWsUrl(m.wsUrl);
+    } catch (err) {
+      log.error({ err: (err as Error).message }, 'mqtt: could not store the announced WebSocket fallback URL');
+      return;
+    }
+    this.identity = updated;
+    if (m.wsUrl)
+      log.warn(
+        { wsUrl: m.wsUrl },
+        'mqtt: the platform enabled the WebSocket fallback for this gateway (token refresh, D-239) — applies to the next connect',
+      );
+    else
+      log.warn(
+        { was: id.mqttWsUrl },
+        'mqtt: the platform disabled the WebSocket fallback for this gateway (token refresh) — 8883 only from the next connect',
+      );
+    this.link?.setWsUrl?.(wsFallbackUrl(updated, this.d.env, log));
   }
 
   /** Boots the agent; resolves once the identity exists and the link is started. */

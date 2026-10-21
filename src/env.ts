@@ -22,8 +22,8 @@ export interface AgentEnv {
   mqttServername: string | undefined;
   /**
    * `GP_MQTT_WS_FALLBACK`: allow the WebSocket fallback `wss://<MQTT_HOST>/mqtt` after repeated 8883 failures (D-239,
-   * O-012 resolved). Off by default; effective only when the bootstrap answer carried `mqtt.wsUrl` (the platform admin
-   * enabled the fallback for this gateway). On that path the device JWT is the only credential (no client certificate).
+   * O-012 resolved). Off by default; effective only while the API announces `mqtt.wsUrl` — in the bootstrap answer or
+   * in a later token refresh (CR-015, api D-249) — i.e. the platform admin enabled the fallback for this gateway. On that path the device JWT is the only credential (no client certificate).
    */
   mqttWsFallback: boolean;
   httpsFallbackAfterS: number;

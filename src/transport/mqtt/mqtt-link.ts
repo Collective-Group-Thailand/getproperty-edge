@@ -121,6 +121,7 @@ export class MqttLink extends EventEmitter implements Link {
   private readonly clock: Clock;
   private readonly random: () => number;
   private readonly acl: { publish: Set<string>; subscribe: Set<string> };
+  private wsUrl: string | undefined;
 
   constructor(private readonly opts: MqttLinkOptions) {
     super();
@@ -129,6 +130,7 @@ export class MqttLink extends EventEmitter implements Link {
     this.backoff = new Backoff(opts.backoffBaseMs ?? 1000, opts.backoffMaxMs ?? 120_000, opts.random);
     assertSecureBrokerUrl(opts.url);
     if (opts.wsUrl) assertSecureBrokerUrl(opts.wsUrl);
+    this.wsUrl = opts.wsUrl;
     this.acl = effectiveAcl(opts.acl);
   }
 
@@ -141,16 +143,39 @@ export class MqttLink extends EventEmitter implements Link {
   }
 
   get transport(): MqttTransport {
-    return this.useWs && this.opts.wsUrl ? 'wss' : 'mtls';
+    return this.useWs && this.wsUrl ? 'wss' : 'mtls';
   }
 
   get currentUrl(): string {
-    return this.transport === 'wss' ? this.opts.wsUrl! : this.opts.url;
+    return this.transport === 'wss' ? this.wsUrl! : this.opts.url;
   }
 
   /** Expiry (epoch ms) of the device JWT the current session logged in with; 0 before the first connect. */
   get passwordExpiresAt(): number {
     return this.passwordExp;
+  }
+
+  /** The WebSocket fallback URL the link may use right now (undefined = 8883 only). */
+  get fallbackUrl(): string | undefined {
+    return this.wsUrl;
+  }
+
+  /**
+   * Applies a WebSocket fallback URL announced after bootstrap (token refresh, CR-015 / api D-249) — the caller passes
+   * it only when the API announces it **and** `GP_MQTT_WS_FALLBACK=on`. Takes effect on the next connect: a new URL
+   * joins the 8883 → WSS failover; a removed one sends the next connect back to 8883 (a live WSS session ends at the
+   * latest with its JWT rotation, and the broker refuses the WebSocket login anyway). A non-TLS URL is refused (throws)
+   * and the previous value stays — fail closed. TLS verification stays the bootstrap CA's either way.
+   */
+  setWsUrl(wsUrl: string | undefined): void {
+    if (wsUrl) assertSecureBrokerUrl(wsUrl);
+    if (wsUrl === this.wsUrl) return;
+    this.wsUrl = wsUrl;
+    this.failuresOnUrl = 0;
+    if (!wsUrl) {
+      this.useWs = false;
+      this.probingPrimary = false;
+    }
   }
 
   start(): void {
@@ -310,7 +335,7 @@ export class MqttLink extends EventEmitter implements Link {
    */
   private onConnectFailed(transport: MqttTransport): void {
     if (transport === 'mtls' && this.authRefused) return;
-    if (!this.opts.wsUrl) return;
+    if (!this.wsUrl) return;
     if (this.probingPrimary) {
       this.probingPrimary = false;
       this.useWs = true;

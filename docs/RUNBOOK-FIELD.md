@@ -81,18 +81,21 @@ MQTT over `wss://<MQTT_HOST>/mqtt` on 443 is a **per-gateway exception**: on tha
 certificate and logs in with its device JWT alone (risk accepted by the founder, api ADR-0015). Use it only when IT
 confirms 8883 cannot be opened:
 
-1. Ask the office / platform admin to enable the fallback for this gateway **before** the provisioning code is issued
-   (admin device page → _WebSocket fallback_, with the reason, e.g. the IT ticket). The URL arrives only with the
-   bootstrap answer: a gateway already provisioned needs a **new provisioning code** after the switch — re-provision:
-   `systemctl stop getproperty-edge`, `mv /var/lib/getproperty-edge/identity /var/lib/getproperty-edge/identity.old`,
-   start the service and enter the new code as in §5 (buffered readings stay in the queue; the cloud revokes the old
-   certificate; delete `identity.old` once the gateway is connected).
+1. Ask the office / platform admin to enable the fallback for this gateway (admin device page → _WebSocket
+   fallback_, with the reason, e.g. the IT ticket). The URL arrives with the bootstrap answer **and** with every device
+   token refresh (CR-015, api D-249): a gateway that is already provisioned picks it up within one token lifetime
+   (≤ 1 h) and logs `the platform enabled the WebSocket fallback for this gateway` — **no new provisioning code and no
+   site visit**; `systemctl restart getproperty-edge` fetches a token at once if you do not want to wait. (Agents older
+   than CR-015 still need a re-provisioning: `systemctl stop getproperty-edge`,
+   `mv /var/lib/getproperty-edge/identity /var/lib/getproperty-edge/identity.old`, start the service and enter a new
+   code as in §5; delete `identity.old` once connected.)
 2. Install with `install.sh … --mqtt-ws-fallback on` (or set `GP_MQTT_WS_FALLBACK=on` in
    `/etc/getproperty-edge/agent.env` and `systemctl restart getproperty-edge`).
 3. Provision as in §5. The agent still tries 8883 first; after 3 failed attempts it switches and logs
    `switching to the WebSocket fallback`; the status page shows _Broker connected (WebSocket fallback)_.
-4. Both switches are needed: the agent never uses WebSocket when the bootstrap answer had no `wsUrl`, and the broker
-   refuses it when the admin switches the fallback off (the agent then goes back to 8883).
+4. Both switches are needed: the agent never uses WebSocket while the API announces no `wsUrl`, and the broker
+   refuses it when the admin switches the fallback off — the agent then fetches a new token, whose answer no longer
+   carries `wsUrl`, drops the stored URL and goes back to 8883.
 
 When 8883 is opened later: switch the fallback off in the admin page and set `GP_MQTT_WS_FALLBACK=off`.
 

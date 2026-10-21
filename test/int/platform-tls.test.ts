@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { join } from 'node:path';
 
 import mqtt from 'mqtt';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -225,7 +227,8 @@ describe('platform TLS path and protocol 1.2 login (D-230, D-244)', () => {
       expect(tb.broker.connectLog.filter((c) => c.clientId === gw)).toHaveLength(1);
       tb.api.tokenOutages = 0;
       await waitFor(() => tb.broker.connectLog.filter((c) => c.clientId === gw && c.accepted).length >= 2, 10_000);
-      expect(agent.link!.connected).toBe(true);
+      // the broker logs the accepted CONNECT before the CONNACK reaches the agent: wait for the agent's side too
+      await waitFor(() => agent.link!.connected, 5_000);
       await agent.stop();
     } finally {
       tb.api.tokenTtlMs = ttl;
@@ -293,16 +296,77 @@ describe('WebSocket fallback (D-239)', () => {
     await waitFor(() => tb.ingest.events.some((e) => e.gatewayId === gatewayId && e.type === 'config_applied'));
     expect(tb.broker.stats.denied).toBe(0);
 
-    // the platform admin switches the fallback off: the next WebSocket login is refused, the agent goes back to
-    // 8883 (still blocked) and never connects any other way — readings stay queued
+    // the platform admin switches the fallback off: the next WebSocket login is refused; the fresh token fetched after
+    // the refusal no longer carries wsUrl (CR-015), so the agent drops the fallback at once and goes back to 8883
+    // (still blocked) and never connects any other way — readings stay queued
     tb.api.wsFallback.delete(gatewayId);
     const denied = tb.broker.stats.authDenied;
     tb.broker.kick(gw);
-    await waitFor(() => tb.broker.stats.authDenied >= denied + 3, 15_000);
+    await waitFor(() => tb.broker.stats.authDenied >= denied + 1, 15_000);
     await waitFor(() => linkOf(agent).transport === 'mtls', 15_000);
+    await waitFor(() => agent.identityStore.load()!.mqttWsUrl === undefined, 15_000);
+    expect(linkOf(agent).fallbackUrl).toBeUndefined();
     await sleep(500);
     expect(agent.link!.connected).toBe(false);
     expect(tb.broker.connectLog.filter((c) => c.clientId === gw && c.accepted)).toHaveLength(1);
+    await agent.stop();
+  });
+
+  it('CR-015: switched on after provisioning → picked up at the next token refresh (no new code); off again → 8883 only', async () => {
+    const down = `mqtts://${MQTT_HOST}:${await closedPort()}`;
+    const wss = `wss://${MQTT_HOST}:${tb.broker.wsPort}/mqtt`;
+    const ids = meterIds(2, '0192a000-0000-7000-8249');
+    const { agent, gatewayId } = tb.agent({ env: { mqttUrlOverride: down, mqttWsFallback: true } });
+    tb.pushConfig(gatewayId, simConfig(ids));
+    await agent.start();
+    const gw = `gw-${gatewayId}`;
+    const stored = () =>
+      JSON.parse(readFileSync(join(agent.identityStore.dir, 'identity.json'), 'utf8')) as { mqttWsUrl?: string };
+    expect(agent.identityStore.load()!.mqttWsUrl).toBeUndefined();
+    await sleep(1000);
+    expect(agent.link!.connected).toBe(false); // 8883 blocked, no fallback yet
+    expect(linkOf(agent).fallbackUrl).toBeUndefined();
+
+    // the platform admin enables the fallback (set-mqtt-transport); the gateway's next token refresh carries wsUrl
+    tb.api.wsFallback.add(gatewayId);
+    await agent.tokens.mqttPassword({ fresh: true });
+    expect(agent.identityStore.load()!.mqttWsUrl).toBe(wss);
+    expect(stored().mqttWsUrl).toBe(wss);
+    expect(linkOf(agent).fallbackUrl).toBe(wss);
+    await waitFor(() => agent.link!.connected, 15_000);
+    expect(linkOf(agent).transport).toBe('wss');
+    const login = tb.broker.connectLog.filter((c) => c.clientId === gw && c.accepted);
+    expect(login).toHaveLength(1);
+    expect(login[0]!.transport).toBe('ws');
+    expect(login[0]!.peerCert).toBe(false);
+    await waitFor(() => ids.every((m) => tb.ingest.maxSeq(m) === 1), 15_000);
+
+    // switched off: the next refresh drops wsUrl (stored + link); the next connect goes to 8883 only
+    tb.api.wsFallback.delete(gatewayId);
+    await agent.tokens.mqttPassword({ fresh: true });
+    expect(agent.identityStore.load()!.mqttWsUrl).toBeUndefined();
+    expect(stored().mqttWsUrl).toBeUndefined();
+    expect(linkOf(agent).fallbackUrl).toBeUndefined();
+    tb.broker.kick(gw);
+    await waitFor(() => !agent.link!.connected, 10_000);
+    await sleep(1000);
+    expect(linkOf(agent).currentUrl).toBe(down);
+    expect(agent.link!.connected).toBe(false);
+    expect(tb.broker.connectLog.filter((c) => c.clientId === gw && c.accepted)).toHaveLength(1);
+    await agent.stop();
+  });
+
+  it('CR-015: a fallback announced by a token refresh is stored but unused while GP_MQTT_WS_FALLBACK is off', async () => {
+    const down = `mqtts://${MQTT_HOST}:${await closedPort()}`;
+    const { agent, gatewayId } = tb.agent({ env: { mqttUrlOverride: down } });
+    await agent.start();
+    tb.api.wsFallback.add(gatewayId);
+    await agent.tokens.mqttPassword({ fresh: true });
+    expect(agent.identityStore.load()!.mqttWsUrl).toBeDefined();
+    expect(linkOf(agent).fallbackUrl).toBeUndefined();
+    await sleep(2000);
+    expect(linkOf(agent).currentUrl).toBe(down);
+    expect(tb.broker.connectLog.some((c) => c.clientId === `gw-${gatewayId}`)).toBe(false);
     await agent.stop();
   });
 

@@ -10,4 +10,6 @@ import type { TopicSuffix } from '../protocol/types.js';
 export interface Link extends EventEmitter {
   readonly connected: boolean;
   publish(suffix: TopicSuffix, payload: string): Promise<void>;
+  /** WebSocket fallback URL announced after bootstrap (CR-015); links without a fallback ignore it. */
+  setWsUrl?(wsUrl: string | undefined): void;
 }
