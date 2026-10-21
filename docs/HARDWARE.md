@@ -88,7 +88,8 @@ re-baselines the counter; a changed `litresPerPulse` re-baselines at the current
    `SHA256SUMS`, `install.sh`, `ota-guard.sh` and the systemd unit. The api's OTA rollout serves the
    manifest at `/v1/device/ota/manifest` (CR-011).
 4. On a fresh gateway (Raspberry Pi OS Lite 64-bit / Debian 12 arm64, `apt install gpiod`):
-   `sudo ./install.sh --binary ./getproperty-edge-<version>-linux-arm64 --api-url https://api.getproperty.co`.
+   `sudo ./install.sh --binary ./getproperty-edge-<version>-linux-arm64` (`--api-url` defaults to the production
+   device host `https://device.getproperty.co`; UAT: the `DEVICE_HOST` of collective-infra `caddy/sites.uat.yml`).
    It creates `gpedge`, `/var/lib/getproperty-edge` (0700), `/opt/getproperty-edge/slots/{a,b}` + `current`,
    the root-owned OTA guard, the systemd unit, udev rules (RS485 adapters → `dialout` + `/dev/getproperty-rs485-N`,
    gpiochip → `gpio`, LED brightness), NTP (th.pool.ntp.org) and the hardware watchdog (`RuntimeWatchdogSec=30`).

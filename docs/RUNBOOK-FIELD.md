@@ -53,14 +53,27 @@ max ~50 m. Note the channel number (GPIO pin) and the meter's **litres per pulse
 
 ## Troubleshooting
 
-| Status page shows               | Likely cause                                              | Fix                                                                                                  |
-| ------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| meter `not_found`               | wrong Modbus ID or meter model, meter unpowered           | check the ID on the meter vs the PWA binding                                                         |
-| meter `timeout` (was ok before) | A/B swapped, cable cut, missing termination on a long run | swap A/B, check continuity, fit 120 Ω                                                                |
-| meter `crc_error`               | noise, wrong baud/parity, two meters with the same ID     | check baud 9600 8N2, unique IDs, shield at one end                                                   |
-| Broker `disconnected`           | building firewall blocks 8883                             | ask IT to allow outbound TCP 8883; the agent also tries WSS 443 and falls back to HTTPS after 10 min |
-| readings `clock_suspect` (PWA)  | NTP blocked                                               | allow outbound UDP 123 or the gateway's 4G link                                                      |
-| Queue keeps growing             | no uplink                                                 | readings are safe on disk for 30 days; restore the uplink                                            |
+| Status page shows               | Likely cause                                              | Fix                                                                                                                                                         |
+| ------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| meter `not_found`               | wrong Modbus ID or meter model, meter unpowered           | check the ID on the meter vs the PWA binding                                                                                                                |
+| meter `timeout` (was ok before) | A/B swapped, cable cut, missing termination on a long run | swap A/B, check continuity, fit 120 Ω                                                                                                                       |
+| meter `crc_error`               | noise, wrong baud/parity, two meters with the same ID     | check baud 9600 8N2, unique IDs, shield at one end                                                                                                          |
+| Broker `disconnected`           | building firewall blocks 8883                             | ask IT to allow outbound TCP 8883 to the MQTT host; readings keep flowing over HTTPS (443, device host) after 10 min — there is no WSS fallback yet (O-012) |
+| readings `clock_suspect` (PWA)  | NTP blocked                                               | allow outbound UDP 123 or the gateway's 4G link                                                                                                             |
+| Queue keeps growing             | no uplink                                                 | readings are safe on disk for 30 days; restore the uplink                                                                                                   |
+
+## Outbound connections the building must allow
+
+| To                                                                             | Port     | What                                                                        |
+| ------------------------------------------------------------------------------ | -------- | --------------------------------------------------------------------------- |
+| MQTT host (`mqtt.getproperty.co`, UAT: collective-infra `caddy/sites.uat.yml`) | TCP 8883 | MQTT 5 + mutual TLS — the normal path                                       |
+| Device host (`device.getproperty.co`)                                          | TCP 443  | bootstrap, token, certificate renewal, config pull, HTTPS readings fallback |
+| OTA artefact host (from the signed manifest)                                   | TCP 443  | updates                                                                     |
+| NTP (`th.pool.ntp.org`)                                                        | UDP 123  | clock (`clock_suspect` without it)                                          |
+
+A building that cannot open 8883 is not onboarded in R1 (O-012: no WSS-on-443 fallback on the platform yet); the
+HTTPS fallback keeps readings flowing (and pulls the first config on a cold start) during an outage, but commands, health and OTA need
+MQTT.
 
 ## Firewall (optional, recommended)
 

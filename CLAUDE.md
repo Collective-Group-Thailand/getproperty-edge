@@ -5,7 +5,7 @@ The gateway agent that runs inside each building on a Linux ARM64 gateway (D-132
 
 ## Read before every task
 1. `docs/prompts/00-master-plan.md` — architecture, conventions, run order, Definition of Done.
-2. `docs/decisions.md` — decisions D-013, D-030, D-033, D-034, D-130–D-132, D-151 (naming), D-157 (no breaker cut-off), D-162 (telemetry storage) are the ones that bind this repo.
+2. `docs/decisions.md` — decisions D-013, D-030, D-033, D-034, D-130–D-132, D-151 (naming), D-157 (no breaker cut-off), D-162 (telemetry storage), D-230 (cloud on Collective's shared AWS platform) and O-012 (no WSS fallback in R1) are the ones that bind this repo.
 3. **`docs/contract/device-protocol.md`** — the MQTT contract (identical copy owned by `getproperty-api`); payload types are generated from `contract/device-protocol.json` by `pnpm gen:protocol` into `src/protocol/types.ts` — never hand-write them.
 4. The prompt you were asked to execute (`docs/prompts/E*.md`) — only that deliverable.
 5. `docs/PROGRESS.md` (latest entries).
@@ -17,7 +17,8 @@ The gateway agent that runs inside each building on a Linux ARM64 gateway (D-132
 - Drivers are isolated behind `MeterDriver` (`read(address) → { register, unit, extra }`) with a simulator driver for tests; a new meter model is a driver, never a protocol change (D-013).
 - No secrets on disk except the device certificate/key (0600, owned by the service user); no inbound network services except the status page, which binds to localhost by default and requires the local admin token when exposed on the LAN (D-227 review fix #12; see SECURITY.md).
 - Single binary (Node 24 SEA or pkg) + systemd unit + A/B update slots; must run on 512 MB RAM; CPU budget < 10 % average on a Cortex-A53 at 300 meters / 15-min polling.
+- Cloud endpoints (D-230, `docs/SECURITY.md`): HTTPS only to the **device host** (`GP_API_URL`, default `https://device.getproperty.co`, Caddy client-certificate check); MQTT only to the bootstrap's `mqtts://<MQTT_HOST>:8883` with the bootstrap CA as the sole trust anchor; no WSS unless `GP_MQTT_WS_FALLBACK=on` (O-012); never a plaintext or credential-less fallback.
 - Plan Mode first for each deliverable; small slices; Conventional Commits; CI green. Ambiguity → `docs/PROGRESS.md` + the conservative option.
 
 ## Commands
-`pnpm dev` (runs against the local compose EMQX of `getproperty-api` with the simulator driver) · `pnpm gen:protocol` · `pnpm lint` · `pnpm typecheck` · `pnpm test` · `pnpm test:hw` (needs a real RS485 adapter; skipped in CI) · `pnpm build:sea` · `pnpm image` (OTA artefact + signature)
+`pnpm dev:local` (whole loop on one machine: in-process mTLS broker, API stub, simulator) · `pnpm dev` (agent only; `GP_DRIVER_MODE=simulator`, point `GP_API_URL` at a running getproperty-api) · `pnpm gen:protocol` / `pnpm gen:protocol:check` · `pnpm lint` · `pnpm format:check` · `pnpm typecheck` · `pnpm test` (unit) · `pnpm test:int` · `pnpm test:soak` · `pnpm test:e2e` (Playwright) · `pnpm test:hw` (needs a real RS485 adapter; skipped in CI) · `pnpm build` · `pnpm build:sea` · `pnpm image` (OTA artefact + signature)
